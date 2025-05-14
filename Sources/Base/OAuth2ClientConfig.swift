@@ -10,8 +10,8 @@ import Foundation
 
 
 /**
-Client configuration object that holds on to client-server specific configurations such as client id, -secret and server URLs.
-*/
+ Client configuration object that holds on to client-server specific configurations such as client id, -secret and server URLs.
+ */
 open class OAuth2ClientConfig {
 	
 	/// The client id.
@@ -31,7 +31,7 @@ open class OAuth2ClientConfig {
 	
 	/// The URL where we can exchange a code for a token.
 	public final var tokenURL: URL?
-
+	
 	/// The URL where we can refresh an access token using a refresh token.
 	public final var refreshURL: URL?
 	
@@ -49,10 +49,10 @@ open class OAuth2ClientConfig {
 	
 	/// The receiver's access token.
 	open var accessToken: String?
-
+	
 	/// The receiver's id token.  Used by Google + and AWS Cognito
 	open var idToken: String?
-
+	
 	/// The access token's expiry date.
 	open var accessTokenExpiry: Date?
 	
@@ -98,13 +98,16 @@ open class OAuth2ClientConfig {
 	/// See https://tools.ietf.org/html/rfc7636
 	///
 	open var useProofKeyForCodeExchange = false
-
+	
 	/// Optional custom User-Agent string for embedded mode.
 	open var customUserAgent: String?
-
+	
+	/// Optional audience properties
+	open var audience: String?
+	
 	/**
-	Initializer to initialize properties from a settings dictionary.
-	*/
+	 Initializer to initialize properties from a settings dictionary.
+	 */
 	public init(settings: OAuth2JSON) {
 		clientId = settings["client_id"] as? String
 		clientSecret = settings["client_secret"] as? String
@@ -166,16 +169,18 @@ open class OAuth2ClientConfig {
 		}
 		
 		customUserAgent = settings["custom_user_agent"] as? String
+		
+		audience = settings["audience"] as? String
 	}
 	
 	
 	/**
-	Update properties from response data.
-	
-	This method assumes values are present with the standard names, such as `access_token`, and assigns them to its properties.
-	
-	- parameter json: JSON data returned from a request
-	*/
+	 Update properties from response data.
+	 
+	 This method assumes values are present with the standard names, such as `access_token`, and assigns them to its properties.
+	 
+	 - parameter json: JSON data returned from a request
+	 */
 	func updateFromResponse(_ json: OAuth2JSON) {
 		if let access = json["access_token"] as? String {
 			accessToken = access
@@ -199,10 +204,10 @@ open class OAuth2ClientConfig {
 	}
 	
 	/**
-	Creates a dictionary of credential items that can be stored to the keychain.
-	
-	- returns: A storable dictionary with credentials
-	*/
+	 Creates a dictionary of credential items that can be stored to the keychain.
+	 
+	 - returns: A storable dictionary with credentials
+	 */
 	func storableCredentialItems() -> [String: Any]? {
 		guard let clientId = clientId, !clientId.isEmpty else { return nil }
 		
@@ -215,10 +220,10 @@ open class OAuth2ClientConfig {
 	}
 	
 	/**
-	Creates a dictionary of token items that can be stored to the keychain.
-	
-	- returns: A storable dictionary with token data
-	*/
+	 Creates a dictionary of token items that can be stored to the keychain.
+	 
+	 - returns: A storable dictionary with token data
+	 */
 	func storableTokenItems() -> [String: Any]? {
 		guard let access = accessToken, !access.isEmpty else { return nil }
 		
@@ -236,11 +241,11 @@ open class OAuth2ClientConfig {
 	}
 	
 	/**
-	Updates receiver's instance variables with values found in the dictionary. Returns a list of messages that can be logged on debug.
-	
-	- parameter items: The dictionary representation of the data to store to keychain
-	- returns: An array of strings containing log messages
-	*/
+	 Updates receiver's instance variables with values found in the dictionary. Returns a list of messages that can be logged on debug.
+	 
+	 - parameter items: The dictionary representation of the data to store to keychain
+	 - returns: An array of strings containing log messages
+	 */
 	func updateFromStorableItems(_ items: [String: Any]) -> [String] {
 		var messages = [String]()
 		if let id = items["id"] as? String {
