@@ -293,6 +293,8 @@ open class OAuth2: OAuth2Base {
 			req.params["code_challenge"] = context.codeChallenge()
 			req.params["code_challenge_method"] = context.codeChallengeMethod
 		}
+        
+        req.params["audience"] = "https://geomesh.eu.auth0.com/api/v2/"
 		req.add(params: params)
 		
 		return req
