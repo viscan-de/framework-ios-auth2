@@ -101,6 +101,9 @@ open class OAuth2ClientConfig {
 
 	/// Optional custom User-Agent string for embedded mode.
 	open var customUserAgent: String?
+	
+	/// Optional audience properties
+	open var audience: String?
 
 	/**
 	Initializer to initialize properties from a settings dictionary.
@@ -166,6 +169,8 @@ open class OAuth2ClientConfig {
 		}
 		
 		customUserAgent = settings["custom_user_agent"] as? String
+		
+		audience = settings["audience"] as? String
 	}
 	
 	

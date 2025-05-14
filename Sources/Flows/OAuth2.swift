@@ -294,7 +294,11 @@ open class OAuth2: OAuth2Base {
 			req.params["code_challenge_method"] = context.codeChallengeMethod
 		}
         
-        req.params["audience"] = "https://geomesh.eu.auth0.com/api/v2/"
+		if let audience = clientConfig.audience {
+			print("audience", audience)
+			
+			req.params["audience"] = audience
+		}
 		req.add(params: params)
 		
 		return req
@@ -306,8 +310,8 @@ open class OAuth2: OAuth2Base {
 	- parameter params: Optional, additional URL params to supply to the request
 	- returns:          NSURL to be used to start the OAuth dance
 	*/
-	open func authorizeURL(params: OAuth2StringDict? = nil) throws -> URL {
-		return try authorizeURL(withRedirect: nil, scope: nil, params: params)
+    open func authorizeURL(params: OAuth2StringDict? = nil) throws -> URL {
+        return try authorizeURL(withRedirect: nil, scope: nil, params: params)
 	}
 	
 	/**
@@ -319,7 +323,7 @@ open class OAuth2: OAuth2Base {
 	- parameter params:   Any additional parameters as dictionary with string keys and values that will be added to the query part
 	- returns:            NSURL to be used to start the OAuth dance
 	*/
-	open func authorizeURL(withRedirect redirect: String?, scope: String?, params: OAuth2StringDict?) throws -> URL {
+    open func authorizeURL(withRedirect redirect: String?, scope: String?, params: OAuth2StringDict?) throws -> URL {
 		guard let redirect = (redirect ?? clientConfig.redirect) else {
 			throw OAuth2Error.noRedirectURL
 		}
