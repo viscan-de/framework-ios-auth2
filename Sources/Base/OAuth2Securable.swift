@@ -165,6 +165,14 @@ open class OAuth2Securable: OAuth2Requestable {
 		return nil
 	}
 	
+	/// Called when tokens could not be written to the keychain.
+	///
+	/// Worth observing: with the default `kSecAttrAccessibleWhenUnlocked`, a refresh performed while the
+	/// device is locked rotates the token server-side but cannot store the replacement. The old token is
+	/// already dead at that point, so the session is lost at the next launch — silently, because `logger`
+	/// is usually nil in release builds.
+	public var onKeychainWriteFailure: ((Error) -> Void)?
+
 	/** Stores our current token(s) in the keychain. */
 	public func storeTokensToKeychain() {
 		if let items = storableTokenItems() {
@@ -175,6 +183,7 @@ open class OAuth2Securable: OAuth2Requestable {
 			}
 			catch let error {
 				logger?.warn("OAuth2", msg: "Failed to store tokens to keychain: \(error)")
+				onKeychainWriteFailure?(error)
 			}
 		}
 	}

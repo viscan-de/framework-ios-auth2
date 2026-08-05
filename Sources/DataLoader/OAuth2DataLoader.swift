@@ -56,9 +56,20 @@ open class OAuth2DataLoader: OAuth2Requestable {
 	
 	// MARK: - Make Requests
 	
-	/// Our FIFO queue.
+	/// Guards `enqueued` and `isAuthorizing`.
+	///
+	/// Both are mutated from URLSession completion callbacks, which run on arbitrary background
+	/// threads. A loader shared between concurrent requests — the only way this class can actually
+	/// serialize refreshes — races on them otherwise, and two requests each starting a refresh
+	/// spend the same rotating refresh token twice.
+	///
+	/// Recursive because `dequeueAndApply` re-enters `perform` by way of `retryAll`.
+	private let stateLock = NSRecursiveLock()
+
+	/// Our FIFO queue. Only touch while holding `stateLock`.
 	private var enqueued: [OAuth2DataRequest]?
-	
+
+	/// Only touch while holding `stateLock`.
 	private var isAuthorizing = false
 	
 	/**
@@ -107,11 +118,16 @@ open class OAuth2DataLoader: OAuth2Requestable {
 	- parameter callback: The callback to call when the request completes/fails
 	*/
 	open func perform(request: URLRequest, retry: Bool, callback: @escaping ((OAuth2Response) -> Void)) {
-		guard !isAuthorizing else {
+		// Reading the flag and enqueuing must be one atomic step. Split apart, a request can observe
+		// "not authorizing", then enqueue into a queue that has just been drained, and hang forever.
+		stateLock.lock()
+		if isAuthorizing {
 			enqueue(request: request, callback: callback)
+			stateLock.unlock()
 			return
 		}
-		
+		stateLock.unlock()
+
 		super.perform(request: request) { response in
 			do {
 				if self.alsoIntercept403, 403 == response.response.statusCode {
@@ -158,12 +174,28 @@ open class OAuth2DataLoader: OAuth2Requestable {
 	                      non-nil but may be an empty dict), fails (error will be non-nil) or is canceled (both params and error are nil)
 	*/
 	open func attemptToAuthorize(callback: @escaping ((OAuth2JSON?, OAuth2Error?) -> Void)) {
-		if !isAuthorizing {
+		// Claim the authorization atomically. Two requests failing at the same moment would otherwise
+		// both see `isAuthorizing == false` and each start a refresh — spending a rotating refresh
+		// token twice, which providers treat as replay and answer with `invalid_grant`.
+		stateLock.lock()
+		let alreadyAuthorizing = isAuthorizing
+		if !alreadyAuthorizing {
 			isAuthorizing = true
-			oauth2.authorize() { authParams, error in
-				self.isAuthorizing = false
-				callback(authParams, error)
-			}
+		}
+		stateLock.unlock()
+
+		// A cycle is already running; this caller's request is queued and `retryAll()` will pick it up.
+		guard !alreadyAuthorizing else {
+			return
+		}
+
+		oauth2.authorize() { authParams, error in
+			// Cleared *before* the callback, which drains the queue: `retryAll()` re-enters `perform`,
+			// and that would re-enqueue every retried request if the flag were still set.
+			self.stateLock.lock()
+			self.isAuthorizing = false
+			self.stateLock.unlock()
+			callback(authParams, error)
 		}
 	}
 	
@@ -186,6 +218,8 @@ open class OAuth2DataLoader: OAuth2Requestable {
 	- parameter request:  The OAuth2DataRequest to enqueue for later execution
 	*/
 	public func enqueue(request: OAuth2DataRequest) {
+		stateLock.lock()
+		defer { stateLock.unlock() }
 		if nil == enqueued {
 			enqueued = [request]
 		}
@@ -200,10 +234,16 @@ open class OAuth2DataLoader: OAuth2Requestable {
 	- parameter closure: The closure to apply to each enqueued request
 	*/
 	public func dequeueAndApply(closure: ((OAuth2DataRequest) -> Void)) {
-		guard let enq = enqueued else {
+		// Take the queue under the lock, then apply outside it: the closure re-performs requests and
+		// must not run with the lock held.
+		stateLock.lock()
+		let enq = enqueued
+		enqueued = nil
+		stateLock.unlock()
+
+		guard let enq = enq else {
 			return
 		}
-		enqueued = nil
 		enq.forEach(closure)
 	}
 	

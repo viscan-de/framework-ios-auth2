@@ -222,3 +222,20 @@ public func callOnMainThread(_ callback: (() -> Void)) {
 	}
 }
 
+
+/**
+Helper function to run the callback on the main thread without blocking the caller.
+
+Unlike `callOnMainThread(_:)`, this never uses `DispatchQueue.main.sync`, so it is safe to call from a
+URLSession completion handler: a synchronous hop from there deadlocks whenever the main thread is itself
+waiting on that session's work.
+*/
+public func callAsyncOnMainThread(_ callback: @escaping (() -> Void)) {
+	if Thread.isMainThread {
+		callback()
+	}
+	else {
+		DispatchQueue.main.async(execute: callback)
+	}
+}
+

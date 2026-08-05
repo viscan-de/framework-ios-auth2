@@ -121,12 +121,17 @@ open class OAuth2: OAuth2Base {
                         self.didFail(with: error)
                     }
                     else {
-                        do {
-                            assert(Thread.isMainThread)
-                            try self.doAuthorize(params: params)
-                        }
-                        catch let error {
-                            self.didFail(with: error.asOAuth2Error)
+                        // `doAuthorize` presents UI, but `authorize()` is not only called from the
+                        // main thread: `OAuth2DataLoader` re-authorizes from a URLSession completion
+                        // callback when a request comes back 401, which runs on a background thread.
+                        // Hop to main rather than asserting our way into a crash there.
+                        callAsyncOnMainThread {
+                            do {
+                                try self.doAuthorize(params: params)
+                            }
+                            catch let error {
+                                self.didFail(with: error.asOAuth2Error)
+                            }
                         }
                     }
                 }
@@ -377,11 +382,37 @@ open class OAuth2: OAuth2Base {
             perform(request: post) { response in
                 do {
                     let data = try response.responseData()
-                    let json = try self.parseRefreshTokenResponseData(data)
+
+                    // The error status must be handled *before* parsing. `parseRefreshTokenResponseData`
+                    // throws on the response's `error` key, so the cleanup that used to sit after it was
+                    // unreachable for every real provider error — leaving a dead refresh token in place to
+                    // be replayed forever.
                     if response.response.statusCode >= 400 {
-                        self.clientConfig.refreshToken = nil
-                        throw OAuth2Error.generic("Failed with status \(response.response.statusCode)")
+                        let json = try? self.parseJSON(data)
+                        let parsedError = json.flatMap { self.errorInResponse($0) }
+                        if self.refreshTokenIsUnusable(
+                            status: response.response.statusCode,
+                            error: parsedError,
+                            bodyWasJSON: nil != json
+                        ) {
+                            // Providers that rotate refresh tokens revoke the whole family once one is
+                            // replayed, so there is nothing left to retry with. Drop the credentials from
+                            // memory *and* the keychain. `storeTokensToKeychain()` cannot do this:
+                            // `storableTokenItems()` returns nil while the access token is empty — which it
+                            // is during a refresh — so the stale entry would simply survive.
+                            //
+                            // This drops the access and ID tokens along with the refresh token, where the
+                            // old code only nilled `refreshToken` in memory. That is intended: a refresh
+                            // only runs once the access token is already gone or expired, so there is
+                            // nothing usable to preserve, and a half-cleared keychain entry is what let a
+                            // dead session look alive.
+                            self.logger?.debug("OAuth2", msg: "Refresh token rejected, discarding tokens")
+                            self.forgetTokens()
+                        }
+                        throw parsedError ?? OAuth2Error.generic("Failed with status \(response.response.statusCode)")
                     }
+
+                    let json = try self.parseRefreshTokenResponseData(data)
                     self.logger?.debug("OAuth2", msg: "Did use refresh token for access token [\(nil != self.clientConfig.accessToken)]")
                     if (self.useKeychain) {
                         self.storeTokensToKeychain()
@@ -398,8 +429,56 @@ open class OAuth2: OAuth2Base {
             callback(nil, error.asOAuth2Error)
         }
     }
-    
-    
+
+    /**
+     Extracts the provider's own error from a parsed response body, if it carries one.
+
+     - parameter dict: The parsed body of the failed refresh response
+     - returns: The `OAuth2Error` the body describes, or nil if it carried no `error` key
+     */
+    open func errorInResponse(_ dict: OAuth2JSON) -> OAuth2Error? {
+        do {
+            try assureNoErrorInResponse(dict)
+            return nil
+        }
+        catch let error {
+            return error.asOAuth2Error
+        }
+    }
+
+    /**
+     Whether a failed refresh means the refresh token itself is dead and must be discarded.
+
+     Deliberately narrow. Discarding is irreversible for the user — it costs them an interactive
+     login — so it happens only when the provider actually said the grant is bad:
+
+     - a 429 or a 5xx is transient and must be retried, not signed out of;
+     - a 4xx whose body is not JSON is far more likely a proxy, WAF or captive portal than the token
+       endpoint, and must not be taken as the provider's word.
+
+     Note that `OAuth2Response.responseData()` throws on 401 and 403 before this is reached, so a
+     status of 401 never arrives here — do not add a branch for it.
+
+     - parameter status:       The HTTP status the refresh responded with
+     - parameter error:        The provider's parsed error, if the body carried one
+     - parameter bodyWasJSON:  Whether the body parsed as JSON at all
+     - returns: `true` when the stored tokens should be forgotten
+     */
+    open func refreshTokenIsUnusable(status: Int, error: OAuth2Error?, bodyWasJSON: Bool) -> Bool {
+        guard let error = error else {
+            // No machine-readable error, but a JSON body from the token endpoint: per RFC 6749 a
+            // rejected grant is a 400.
+            return bodyWasJSON && status == 400
+        }
+        switch error {
+        case .invalidGrant, .unauthorizedClient, .expiredToken:
+            return true
+        default:
+            return false
+        }
+    }
+
+
     // MARK: - Registration
     
     /**
