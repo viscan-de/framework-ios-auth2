@@ -121,12 +121,17 @@ open class OAuth2: OAuth2Base {
                         self.didFail(with: error)
                     }
                     else {
-                        do {
-                            assert(Thread.isMainThread)
-                            try self.doAuthorize(params: params)
-                        }
-                        catch let error {
-                            self.didFail(with: error.asOAuth2Error)
+                        // `doAuthorize` presents UI, but `authorize()` is not only called from the
+                        // main thread: `OAuth2DataLoader` re-authorizes from a URLSession completion
+                        // callback when a request comes back 401, which runs on a background thread.
+                        // Hop to main rather than asserting our way into a crash there.
+                        callAsyncOnMainThread {
+                            do {
+                                try self.doAuthorize(params: params)
+                            }
+                            catch let error {
+                                self.didFail(with: error.asOAuth2Error)
+                            }
                         }
                     }
                 }
@@ -377,11 +382,26 @@ open class OAuth2: OAuth2Base {
             perform(request: post) { response in
                 do {
                     let data = try response.responseData()
-                    let json = try self.parseRefreshTokenResponseData(data)
+
+                    // The error status must be handled *before* parsing. `parseRefreshTokenResponseData`
+                    // throws on the response's `error` key, so the cleanup that used to sit after it was
+                    // unreachable for every real provider error — leaving a dead refresh token in place to
+                    // be replayed forever.
                     if response.response.statusCode >= 400 {
-                        self.clientConfig.refreshToken = nil
-                        throw OAuth2Error.generic("Failed with status \(response.response.statusCode)")
+                        let parsedError = self.refreshErrorInResponse(data)
+                        if self.refreshTokenIsUnusable(status: response.response.statusCode, error: parsedError) {
+                            // Providers that rotate refresh tokens revoke the whole family once one is
+                            // replayed, so there is nothing left to retry with. Drop the credentials from
+                            // memory *and* the keychain. `storeTokensToKeychain()` cannot do this:
+                            // `storableTokenItems()` returns nil while the access token is empty — which it
+                            // is during a refresh — so the stale entry would simply survive.
+                            self.logger?.debug("OAuth2", msg: "Refresh token rejected, discarding tokens")
+                            self.forgetTokens()
+                        }
+                        throw parsedError ?? OAuth2Error.generic("Failed with status \(response.response.statusCode)")
                     }
+
+                    let json = try self.parseRefreshTokenResponseData(data)
                     self.logger?.debug("OAuth2", msg: "Did use refresh token for access token [\(nil != self.clientConfig.accessToken)]")
                     if (self.useKeychain) {
                         self.storeTokensToKeychain()
@@ -398,8 +418,50 @@ open class OAuth2: OAuth2Base {
             callback(nil, error.asOAuth2Error)
         }
     }
-    
-    
+
+    /**
+     Extracts the provider's own error from a failed token refresh body, if it carries one.
+
+     - parameter data: The raw body of the failed refresh response
+     - returns: The parsed `OAuth2Error`, or nil if the body was not JSON or carried no `error` key
+     */
+    open func refreshErrorInResponse(_ data: Data) -> OAuth2Error? {
+        guard let dict = try? parseJSON(data) else {
+            return nil
+        }
+        do {
+            try assureNoErrorInResponse(dict)
+            return nil
+        }
+        catch let error {
+            return error.asOAuth2Error
+        }
+    }
+
+    /**
+     Whether a failed refresh means the refresh token itself is dead and must be discarded.
+
+     Only a rejected grant qualifies. A 429 or a 5xx is transient — throwing the refresh token away
+     there would force a needless interactive login on what is really a retryable failure.
+
+     - parameter status: The HTTP status the refresh responded with
+     - parameter error:  The provider's parsed error, if the body carried one
+     - returns: `true` when the stored tokens should be forgotten
+     */
+    open func refreshTokenIsUnusable(status: Int, error: OAuth2Error?) -> Bool {
+        guard let error = error else {
+            // No machine-readable error to go on; per RFC 6749 a rejected grant is a 400.
+            return status == 400 || status == 401
+        }
+        switch error {
+        case .invalidGrant, .unauthorizedClient, .expiredToken:
+            return true
+        default:
+            return false
+        }
+    }
+
+
     // MARK: - Registration
     
     /**
