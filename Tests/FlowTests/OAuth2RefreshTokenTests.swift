@@ -144,5 +144,40 @@ class OAuth2RefreshTokenTests: XCTestCase {
 		XCTAssertEqual(dict["param"], "fool")
 		XCTAssertNil(req!.allHTTPHeaderFields?["Authorization"])
 	}
+
+	// MARK: - Discarding a dead refresh token
+
+	/// The regression: `responseData()` throws on 401 before the status is looked at, so a provider
+	/// that answers a rejected grant with 401 rather than 400 kept its dead token and replayed it on
+	/// every later request. Rotating providers read repeated replay as an attack on the family.
+	func testA401FromTheTokenEndpointMeansTheRefreshTokenIsDead() {
+		let oauth = genericOAuth2()
+		XCTAssertTrue(oauth.refreshTokenIsUnusable(status: 401, error: nil, bodyWasJSON: true))
+	}
+
+	func testA400FromTheTokenEndpointStillMeansTheRefreshTokenIsDead() {
+		let oauth = genericOAuth2()
+		XCTAssertTrue(oauth.refreshTokenIsUnusable(status: 400, error: nil, bodyWasJSON: true))
+	}
+
+	/// A 4xx that is not JSON is far more likely a proxy, WAF or captive portal than the token
+	/// endpoint, and must not cost the user their session.
+	func testA401ThatIsNotJSONIsNotTakenAsTheProvidersWord() {
+		let oauth = genericOAuth2()
+		XCTAssertFalse(oauth.refreshTokenIsUnusable(status: 401, error: nil, bodyWasJSON: false))
+	}
+
+	func testATransientServerFailureKeepsTheRefreshToken() {
+		let oauth = genericOAuth2()
+		XCTAssertFalse(oauth.refreshTokenIsUnusable(status: 500, error: nil, bodyWasJSON: true))
+		XCTAssertFalse(oauth.refreshTokenIsUnusable(status: 429, error: nil, bodyWasJSON: true))
+	}
+
+	/// A machine-readable error is the provider saying so outright, whatever status carried it.
+	func testAnInvalidGrantIsDeadWhateverTheStatus() {
+		let oauth = genericOAuth2()
+		XCTAssertTrue(oauth.refreshTokenIsUnusable(status: 401, error: .invalidGrant(nil), bodyWasJSON: true))
+		XCTAssertTrue(oauth.refreshTokenIsUnusable(status: 400, error: .unauthorizedClient(nil), bodyWasJSON: true))
+	}
 }
 
