@@ -381,14 +381,16 @@ open class OAuth2: OAuth2Base {
             
             perform(request: post) { response in
                 do {
-                    let data = try response.responseData()
-
-                    // The error status must be handled *before* parsing. `parseRefreshTokenResponseData`
-                    // throws on the response's `error` key, so the cleanup that used to sit after it was
-                    // unreachable for every real provider error — leaving a dead refresh token in place to
-                    // be replayed forever.
-                    if response.response.statusCode >= 400 {
-                        let json = try? self.parseJSON(data)
+                    // The error status must be handled *before* the body is read. `responseData()`
+                    // throws on 401 and 403 by itself, and `parseRefreshTokenResponseData` throws on the
+                    // response's `error` key — either one skips the cleanup below, leaving a dead refresh
+                    // token in place to be replayed forever. A provider that answers a rejected grant
+                    // with 401 rather than RFC 6749's 400 is exactly the case that got there.
+                    //
+                    // A transport failure is excluded deliberately: it is not the provider's word about
+                    // anything, and `responseData()` below still maps a cancellation to `.requestCancelled`.
+                    if response.response.statusCode >= 400, nil == response.error {
+                        let json = response.data.flatMap { try? self.parseJSON($0) }
                         let parsedError = json.flatMap { self.errorInResponse($0) }
                         if self.refreshTokenIsUnusable(
                             status: response.response.statusCode,
@@ -412,6 +414,7 @@ open class OAuth2: OAuth2Base {
                         throw parsedError ?? OAuth2Error.generic("Failed with status \(response.response.statusCode)")
                     }
 
+                    let data = try response.responseData()
                     let json = try self.parseRefreshTokenResponseData(data)
                     self.logger?.debug("OAuth2", msg: "Did use refresh token for access token [\(nil != self.clientConfig.accessToken)]")
                     if (self.useKeychain) {
@@ -456,8 +459,9 @@ open class OAuth2: OAuth2Base {
      - a 4xx whose body is not JSON is far more likely a proxy, WAF or captive portal than the token
        endpoint, and must not be taken as the provider's word.
 
-     Note that `OAuth2Response.responseData()` throws on 401 and 403 before this is reached, so a
-     status of 401 never arrives here — do not add a branch for it.
+     Every failed status now reaches this method. It previously did not: `responseData()` throws on
+     401 and 403 on its own, and the caller used to read the body first, so a provider answering a
+     rejected grant with 401 kept its dead token and replayed it on every later request.
 
      - parameter status:       The HTTP status the refresh responded with
      - parameter error:        The provider's parsed error, if the body carried one
@@ -466,9 +470,10 @@ open class OAuth2: OAuth2Base {
      */
     open func refreshTokenIsUnusable(status: Int, error: OAuth2Error?, bodyWasJSON: Bool) -> Bool {
         guard let error = error else {
-            // No machine-readable error, but a JSON body from the token endpoint: per RFC 6749 a
-            // rejected grant is a 400.
-            return bodyWasJSON && status == 400
+            // No machine-readable error, but a JSON body from the token endpoint. Per RFC 6749 a
+            // rejected grant is a 400; a 401 there is the endpoint refusing the credentials the
+            // refresh was made with, which leaves the stored token equally unusable.
+            return bodyWasJSON && (status == 400 || status == 401)
         }
         switch error {
         case .invalidGrant, .unauthorizedClient, .expiredToken:

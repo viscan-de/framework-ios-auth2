@@ -89,7 +89,16 @@ open class OAuth2Authorizer: OAuth2AuthorizerUI {
 			guard let redirect = oauth2.redirect else {
 				throw OAuth2Error.noRedirectURL
 			}
-			
+
+			// `ASWebAuthenticationSession.start()` asks its context provider for an anchor synchronously, and a
+			// provider with nothing to offer used to have no way out but to trap. Authorization can be triggered
+			// with no window in reach — `OAuth2DataLoader` re-authorizes from a URLSession completion handler after
+			// a 401 — so refuse here, where the caller still gets an error, instead of crashing the host app.
+			if #available(iOS 13.0, macCatalyst 13.1, *), nil == resolvePresentationAnchor() {
+				oauth2.logger?.warn("OAuth2", msg: "Cannot present the authorization screen: no window to present it from")
+				throw OAuth2Error.noAuthorizationContext
+			}
+
 			authenticationSessionEmbedded(at: url, withRedirect: redirect, prefersEphemeralWebBrowserSession: config.ui.prefersEphemeralWebBrowserSession)
 		} else {
 			#if os(visionOS)
@@ -120,6 +129,37 @@ open class OAuth2Authorizer: OAuth2AuthorizerUI {
 		}
 	}
 	
+	/**
+	Resolves the window an `ASWebAuthenticationSession` can be presented from.
+
+	Prefers what the caller configured: an `authConfig.authorizeContext` that is already an `ASPresentationAnchor` is
+	used as-is, and a `UIViewController` contributes the window it is installed in. A view controller that is not in
+	a window hierarchy contributes nothing — reading `view.window!` there is a crash, not a fallback.
+
+	Falls back to the application's key window, so authorization still works when the context was never set.
+
+	- returns: A window to present from, or nil when the application has none — which is the normal state for
+	           authorization triggered from the background.
+	*/
+	@available(iOS 13.0, macCatalyst 13.1, *)
+	public func resolvePresentationAnchor() -> ASPresentationAnchor? {
+		if let context = oauth2.authConfig.authorizeContext as? ASPresentationAnchor {
+			return context
+		}
+		if let context = oauth2.authConfig.authorizeContext as? UIViewController, let window = context.view.window {
+			return window
+		}
+
+		#if !P2_APP_EXTENSIONS
+		return UIApplication.shared.connectedScenes
+			.compactMap { $0 as? UIWindowScene }
+			.flatMap { $0.windows }
+			.first { $0.isKeyWindow }
+		#else
+		return nil
+		#endif
+	}
+
 	/**
 	Called with the view- and (possibly) navigation-controller that is about to be presented. Useful for subclasses, default implementation
 	does nothing.
@@ -343,15 +383,15 @@ class OAuth2ASWebAuthenticationPresentationContextProvider: NSObject, ASWebAuthe
 	}
 	
 	public func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-		if let context = authorizer.oauth2.authConfig.authorizeContext as? ASPresentationAnchor {
-			return context
+		if let anchor = authorizer.resolvePresentationAnchor() {
+			return anchor
 		}
-		
-		if let context = authorizer.oauth2.authConfig.authorizeContext as? UIViewController {
-			return context.view.window!
-		}
-		
-		fatalError("Invalid authConfig.authorizeContext, must be an ASPresentationAnchor or UIViewController but is \(type(of: authorizer.oauth2.authConfig.authorizeContext))")
+
+		// The window went away between starting the session and this callback. Returning a detached anchor makes
+		// `start()` report false, which is a failure the caller can survive; trapping here is not — this is called
+		// on the main thread of the host app, so a `fatalError` takes the whole app down over a missing window.
+		authorizer.oauth2.logger?.warn("OAuth2", msg: "No presentation anchor available; the authorization screen cannot be shown")
+		return ASPresentationAnchor()
 	}
 }
 
