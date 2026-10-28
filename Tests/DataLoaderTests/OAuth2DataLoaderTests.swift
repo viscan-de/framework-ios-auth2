@@ -200,6 +200,24 @@ class OAuth2DataLoaderTests: XCTestCase {
 		XCTAssertEqual(oauth2!.clientConfig.accessToken, "toktok")
 	}
 
+	/// A client holding an empty token holds none: a stale 401 queues the request and authorizes again,
+	/// as 1.1.2 did, instead of answering the caller with "no access token".
+	func testStale401OverAnEmptyTokenAuthorizesAgain() {
+		oauth2!.clientConfig.accessToken = ""
+		loader!.requestPerformer = OAuth2OnlyBearerPerformer(token: "toktok")
+		var req = URLRequest(url: URL(string: "http://auth.io/data/user")!)
+		req.setValue("Bearer old", forHTTPHeaderField: "Authorization")
+		let answered = expectation(description: "answered")
+		var status: Int?
+		loader!.perform(request: req) { response in
+			status = response.response.statusCode
+			answered.fulfill()
+		}
+		waitForExpectations(timeout: 4.0)
+		XCTAssertEqual(status, 201)
+		XCTAssertEqual(oauth2!.clientConfig.accessToken, "toktok")
+	}
+
 	/// A 401 answering a request sent unsigned forgets the token as before, so a dead token is never kept.
 	func testA401ForAnUnsignedRequestAuthorizesAgain() {
 		oauth2!.clientConfig.accessToken = "dead"
