@@ -218,6 +218,26 @@ class OAuth2DataLoaderTests: XCTestCase {
 		XCTAssertEqual(oauth2!.clientConfig.accessToken, "toktok")
 	}
 
+	/// A header that names no token ("Bearer" alone, or followed only by spaces) or another scheme says
+	/// nothing about an older token: the 401 forgets the token and authorizes again, as 1.1.2 did.
+	func testA401ForAHeaderNamingNoBearerTokenAuthorizesAgain() {
+		for header in ["Bearer", "Bearer   ", "Basic abc"] {
+			oauth2!.clientConfig.accessToken = "new"
+			loader!.requestPerformer = OAuth2OnlyBearerPerformer(token: "new")
+			var req = URLRequest(url: URL(string: "http://auth.io/data/user")!)
+			req.setValue(header, forHTTPHeaderField: "Authorization")
+			let answered = expectation(description: "answered \(header)")
+			var status: Int?
+			loader!.perform(request: req) { response in
+				status = response.response.statusCode
+				answered.fulfill()
+			}
+			waitForExpectations(timeout: 4.0)
+			XCTAssertEqual(status, 401, header)
+			XCTAssertEqual(oauth2!.clientConfig.accessToken, "toktok", header)
+		}
+	}
+
 	/// A 401 answering a request sent unsigned forgets the token as before, so a dead token is never kept.
 	func testA401ForAnUnsignedRequestAuthorizesAgain() {
 		oauth2!.clientConfig.accessToken = "dead"

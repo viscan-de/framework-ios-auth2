@@ -141,8 +141,9 @@ open class OAuth2DataLoader: OAuth2Requestable {
 			catch OAuth2Error.unauthorizedClient {
 				if retry {
 					// A 401 answering a token the client no longer holds says nothing about the one it
-					// holds now, which a concurrent refresh installed: forgetting that one would leave
-					// `retryAll()` no token to sign the queue with and refresh the new token again.
+					// holds now, which a concurrent refresh installed. Forgetting that one would refresh
+					// the new token again, or, while that refresh is still finishing, leave `retryAll()`
+					// no token to sign the queue with.
 					// The request goes again, signed with the token held now and still allowed its
 					// retry; a 401 to that answers the token held now, so it is forgotten and the
 					// client authorizes again below. It goes again only when signing it gives it the
@@ -316,7 +317,9 @@ open class OAuth2DataLoader: OAuth2Requestable {
 		else { return false }
 		let parts = header.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
 		guard parts.count == 2, parts[0].lowercased() == "bearer" else { return false }
-		return parts[1].trimmingCharacters(in: .whitespaces) != current
+		let token = parts[1].trimmingCharacters(in: .whitespaces)
+		guard !token.isEmpty else { return false }
+		return token != current
 	}
 }
 
