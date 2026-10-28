@@ -92,6 +92,74 @@ class OAuth2DataLoaderTests: XCTestCase {
 			XCTAssertNil(error)
 		}
 	}
+
+	/// A queued request whose re-signing fails must still be answered. Here the tokens are forgotten
+	/// (a sign-out) between the authorization's token write and `retryAll()`: re-signing throws
+	/// `noAccessToken`, and before the fix its callback was never called, so the caller waited for
+	/// the life of the process.
+	func testRetryAllAnswersARequestItCannotReSign() {
+		let signingOut = SignOutBeforeRetryDataLoader(oauth2: oauth2!)
+		signingOut.requestPerformer = dataPerformer
+		let req = oauth2!.request(forURL: URL(string: "http://auth.io/data/user")!)
+		let answered = expectation(description: "answered")
+		var answer: OAuth2Response?
+		signingOut.perform(request: req) { response in
+			answer = response
+			answered.fulfill()
+		}
+		waitForExpectations(timeout: 4.0)
+		XCTAssertEqual(answer?.error as? OAuth2Error, OAuth2Error.noAccessToken)
+	}
+
+	/// A 401 answering a request signed with an older token must not forget the token the client
+	/// holds now: that token was installed by a refresh the request did not see. Before the fix it was
+	/// forgotten, the client authorized again ("toktok") and the retried request was refused.
+	func testStale401KeepsTheCurrentToken() {
+		oauth2!.clientConfig.accessToken = "new"
+		loader!.requestPerformer = OAuth2OnlyBearerPerformer(token: "new")
+		var req = URLRequest(url: URL(string: "http://auth.io/data/user")!)
+		req.setValue("Bearer old", forHTTPHeaderField: "Authorization")
+		let answered = expectation(description: "answered")
+		var status: Int?
+		loader!.perform(request: req) { response in
+			status = response.response.statusCode
+			answered.fulfill()
+		}
+		waitForExpectations(timeout: 4.0)
+		XCTAssertEqual(status, 201)
+		XCTAssertEqual(oauth2!.clientConfig.accessToken, "new")
+	}
+}
+
+
+/// Forgets the access token after the authorization succeeded and before the queue is retried.
+class SignOutBeforeRetryDataLoader: OAuth2DataLoader {
+
+	override func attemptToAuthorize(callback: @escaping ((OAuth2JSON?, OAuth2Error?) -> Void)) {
+		super.attemptToAuthorize { json, error in
+			self.oauth2.clientConfig.accessToken = nil
+			callback(json, error)
+		}
+	}
+}
+
+
+/// Answers 201 only to a request signed with the given token, 401 to every other.
+class OAuth2OnlyBearerPerformer: OAuth2RequestPerformer {
+
+	let token: String
+
+	init(token: String) {
+		self.token = token
+	}
+
+	func perform(request: URLRequest, completionHandler callback: @escaping (Data?, URLResponse?, Error?) -> Void) -> URLSessionTask? {
+		let accepted = ("Bearer \(token)" == request.value(forHTTPHeaderField: "Authorization"))
+		let http = HTTPURLResponse(url: request.url!, statusCode: accepted ? 201 : 401, httpVersion: nil, headerFields: nil)!
+		let data = accepted ? try? JSONSerialization.data(withJSONObject: ["data": ["in": "response"]], options: []) : nil
+		callback(data, http, nil)
+		return nil
+	}
 }
 
 
