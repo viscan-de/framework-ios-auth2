@@ -129,10 +129,61 @@ class OAuth2DataLoaderTests: XCTestCase {
 		XCTAssertEqual(status, 201)
 		XCTAssertEqual(oauth2!.clientConfig.accessToken, "new")
 	}
+
+	/// The stale-401 rule reads the scheme case-insensitively and ignores surrounding spaces.
+	func testStale401InAnotherSpellingKeepsTheCurrentToken() {
+		oauth2!.clientConfig.accessToken = "new"
+		loader!.requestPerformer = OAuth2OnlyBearerPerformer(token: "new")
+		var req = URLRequest(url: URL(string: "http://auth.io/data/user")!)
+		req.setValue("  bearer   old ", forHTTPHeaderField: "Authorization")
+		let answered = expectation(description: "answered")
+		var status: Int?
+		loader!.perform(request: req) { response in
+			status = response.response.statusCode
+			answered.fulfill()
+		}
+		waitForExpectations(timeout: 4.0)
+		XCTAssertEqual(status, 201)
+		XCTAssertEqual(oauth2!.clientConfig.accessToken, "new")
+	}
+
+	/// A 401 answering the token the client holds still forgets it and authorizes again: the path that
+	/// worked before the stale-401 rule must keep working.
+	func testA401ForTheCurrentTokenAuthorizesAgain() {
+		oauth2!.clientConfig.accessToken = "dead"
+		loader!.requestPerformer = OAuth2OnlyBearerPerformer(token: "toktok")
+		var req = URLRequest(url: URL(string: "http://auth.io/data/user")!)
+		req.setValue("Bearer dead", forHTTPHeaderField: "Authorization")
+		let answered = expectation(description: "answered")
+		var status: Int?
+		loader!.perform(request: req) { response in
+			status = response.response.statusCode
+			answered.fulfill()
+		}
+		waitForExpectations(timeout: 4.0)
+		XCTAssertEqual(status, 201)
+		XCTAssertEqual(oauth2!.clientConfig.accessToken, "toktok")
+	}
+
+	/// A 401 answering a request sent unsigned forgets the token as before, so a dead token is never kept.
+	func testA401ForAnUnsignedRequestAuthorizesAgain() {
+		oauth2!.clientConfig.accessToken = "dead"
+		loader!.requestPerformer = OAuth2OnlyBearerPerformer(token: "toktok")
+		let req = URLRequest(url: URL(string: "http://auth.io/data/user")!)
+		let answered = expectation(description: "answered")
+		var status: Int?
+		loader!.perform(request: req) { response in
+			status = response.response.statusCode
+			answered.fulfill()
+		}
+		waitForExpectations(timeout: 4.0)
+		XCTAssertEqual(status, 201)
+		XCTAssertEqual(oauth2!.clientConfig.accessToken, "toktok")
+	}
 }
 
 
-/// Forgets the access token after the authorization succeeded and before the queue is retried.
+/// Forgets the access token once the authorization has answered (whatever its outcome) and before the queue is retried.
 class SignOutBeforeRetryDataLoader: OAuth2DataLoader {
 
 	override func attemptToAuthorize(callback: @escaping ((OAuth2JSON?, OAuth2Error?) -> Void)) {
