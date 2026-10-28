@@ -165,6 +165,41 @@ class OAuth2DataLoaderTests: XCTestCase {
 		XCTAssertEqual(oauth2!.clientConfig.accessToken, "toktok")
 	}
 
+	/// A stale 401 whose current token is dead as well still ends in a fresh authorization: the request
+	/// goes again with the current token, that 401 forgets it, and the client authorizes again.
+	func testStale401OverADeadCurrentTokenAuthorizesAgain() {
+		oauth2!.clientConfig.accessToken = "deadnew"
+		loader!.requestPerformer = OAuth2OnlyBearerPerformer(token: "toktok")
+		var req = URLRequest(url: URL(string: "http://auth.io/data/user")!)
+		req.setValue("Bearer old", forHTTPHeaderField: "Authorization")
+		let answered = expectation(description: "answered")
+		var status: Int?
+		loader!.perform(request: req) { response in
+			status = response.response.statusCode
+			answered.fulfill()
+		}
+		waitForExpectations(timeout: 4.0)
+		XCTAssertEqual(status, 201)
+		XCTAssertEqual(oauth2!.clientConfig.accessToken, "toktok")
+	}
+
+	/// A token with spaces around it, signed into the header as it is, is the current token, not an older one.
+	func testA401ForTheCurrentTokenWithSpacesAuthorizesAgain() {
+		oauth2!.clientConfig.accessToken = "dead "
+		loader!.requestPerformer = OAuth2OnlyBearerPerformer(token: "toktok")
+		var req = URLRequest(url: URL(string: "http://auth.io/data/user")!)
+		req.setValue("Bearer dead ", forHTTPHeaderField: "Authorization")
+		let answered = expectation(description: "answered")
+		var status: Int?
+		loader!.perform(request: req) { response in
+			status = response.response.statusCode
+			answered.fulfill()
+		}
+		waitForExpectations(timeout: 4.0)
+		XCTAssertEqual(status, 201)
+		XCTAssertEqual(oauth2!.clientConfig.accessToken, "toktok")
+	}
+
 	/// A 401 answering a request sent unsigned forgets the token as before, so a dead token is never kept.
 	func testA401ForAnUnsignedRequestAuthorizesAgain() {
 		oauth2!.clientConfig.accessToken = "dead"
