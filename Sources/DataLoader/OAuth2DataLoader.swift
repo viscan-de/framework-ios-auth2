@@ -141,7 +141,14 @@ open class OAuth2DataLoader: OAuth2Requestable {
 			catch OAuth2Error.unauthorizedClient {
 				if retry {
 					self.enqueue(request: request, callback: callback)
-					self.oauth2.clientConfig.accessToken = nil
+					// Forget the access token only while it is still the one this request was
+					// signed with. A 401 answering an older token must not wipe the one a
+					// concurrent refresh has just installed: `retryAll()` would find no token to
+					// sign the queue with, and the token just obtained would be refreshed again.
+					if let access = self.oauth2.clientConfig.accessToken,
+					   request.value(forHTTPHeaderField: "Authorization") == "Bearer \(access)" {
+						self.oauth2.clientConfig.accessToken = nil
+					}
 					self.attemptToAuthorize() { json, error in
 						
 						// dequeue all if we're authorized, throw all away if something went wrong
@@ -258,7 +265,13 @@ open class OAuth2DataLoader: OAuth2Requestable {
 				self.perform(request: request, retry: false, callback: req.callback)
 			}
 			catch let error {
+				// Every queued request is answered exactly once. The token can be gone by now (a
+				// sign-out that forgot the tokens, or a 401 signed with an older token), and a
+				// request dropped here leaves its caller waiting for the life of the process.
+				// Answered as `throwAllAway` answers it: a bare response carrying the error.
 				NSLog("OAuth2.DataLoader.retryAll(): \(error)")
+				let failure = (error as? OAuth2Error) ?? OAuth2Error.noAccessToken
+				req.callback(OAuth2Response(data: nil, request: req.request, response: HTTPURLResponse(), error: failure))
 			}
 		}
 	}
