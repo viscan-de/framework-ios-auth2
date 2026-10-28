@@ -140,6 +140,26 @@ open class OAuth2DataLoader: OAuth2Requestable {
 			// not authorized; stop and enqueue all requests, start authorization once, then re-try all enqueued requests
 			catch OAuth2Error.unauthorizedClient {
 				if retry {
+					// A 401 answering a token the client no longer holds says nothing about the one it
+					// holds now, which a concurrent refresh installed. Forgetting that one would refresh
+					// the new token again, or, while that refresh is still finishing, leave `retryAll()`
+					// no token to sign the queue with.
+					// The request goes again, signed with the token held now and still allowed its
+					// retry; a 401 to that answers the token held now, so it is forgotten and the
+					// client authorizes again below. It goes again only when signing it gives it the
+					// token held now, so it is sent again at most once for each token a refresh
+					// installs. Where it cannot be signed with that token (the token went meanwhile),
+					// and for a request sent unsigned or with a header this cannot read, it is queued,
+					// the token forgotten and the client authorizes again, as before.
+					let held = self.oauth2.clientConfig.accessToken
+					if Self.answersAnOlderToken(request, current: held) {
+						var resigned = request
+						let signed = (try? resigned.sign(with: self.oauth2)) != nil
+						if signed, !Self.answersAnOlderToken(resigned, current: held) {
+							self.perform(request: resigned, retry: true, callback: callback)
+							return
+						}
+					}
 					self.enqueue(request: request, callback: callback)
 					self.oauth2.clientConfig.accessToken = nil
 					self.attemptToAuthorize() { json, error in
@@ -258,7 +278,13 @@ open class OAuth2DataLoader: OAuth2Requestable {
 				self.perform(request: request, retry: false, callback: req.callback)
 			}
 			catch let error {
+				// Every queued request is answered exactly once. The token can be gone by now (a
+				// sign-out that forgot the tokens, or a refresh answered without an access token),
+				// and a request dropped here leaves its caller waiting for the life of the process.
+				// Answered as `throwAllAway` answers it: a bare response carrying the error.
 				NSLog("OAuth2.DataLoader.retryAll(): \(error)")
+				let failure = (error as? OAuth2Error) ?? OAuth2Error.noAccessToken
+				req.callback(OAuth2Response(data: nil, request: req.request, response: HTTPURLResponse(), error: failure))
 			}
 		}
 	}
@@ -273,6 +299,27 @@ open class OAuth2DataLoader: OAuth2Requestable {
 			let res = OAuth2Response(data: nil, request: req.request, response: HTTPURLResponse(), error: error)
 			req.callback(res)
 		}
+	}
+
+	/**
+	Whether `request` was signed with a bearer token other than `current`: a 401 answering it says nothing about `current`.
+
+	The scheme is read case-insensitively, and spaces around the scheme and around either token are ignored. A request with no
+	`Authorization` header, a header in another scheme or one this cannot read, and a client holding no token or an empty one all
+	answer `false`, so the 401 forgets the token.
+
+	- parameter request: The request a 401 answered
+	- parameter current: The access token the client holds now
+	*/
+	static func answersAnOlderToken(_ request: URLRequest, current: String?) -> Bool {
+		guard let current = current?.trimmingCharacters(in: .whitespaces), !current.isEmpty,
+		      let header = request.value(forHTTPHeaderField: "Authorization")
+		else { return false }
+		let parts = header.split(separator: " ", maxSplits: 1, omittingEmptySubsequences: true)
+		guard parts.count == 2, parts[0].lowercased() == "bearer" else { return false }
+		let token = parts[1].trimmingCharacters(in: .whitespaces)
+		guard !token.isEmpty else { return false }
+		return token != current
 	}
 }
 
