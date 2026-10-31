@@ -42,9 +42,15 @@ open class OAuth2ImplicitGrantWithQueryParams: OAuth2ImplicitGrant {
 			}
 
 			let params = type(of: self).params(fromQuery: query)
-			let dict = try parseAccessTokenResponse(params: params)
-			logger?.debug("OAuth2", msg: "Successfully extracted access token")
-			didAuthorize(withParameters: dict)
+			do {
+				let dict = try parseAccessTokenResponse(params: params)
+				logger?.debug("OAuth2", msg: "Successfully extracted access token")
+				didAuthorize(withParameters: dict)
+			}
+			catch OAuth2Error.invalidState where isLateRedirect(params) {
+				// the state is checked before any token is installed
+				logger?.debug("OAuth2", msg: "Dropping the redirect of an authorization that has ended")
+			}
 		}
 		catch let error {
 			didFail(with: error.asOAuth2Error)

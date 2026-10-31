@@ -82,9 +82,20 @@ open class OAuth2CodeGrant: OAuth2 {
 			let code = try validateRedirectURL(redirect)
 			exchangeCodeForToken(code)
 		}
+		catch OAuth2Error.invalidState where isLateRedirect(queryParams(of: redirect)) {
+			logger?.debug("OAuth2", msg: "Dropping the redirect of an authorization that has ended")
+		}
 		catch let error {
 			didFail(with: error.asOAuth2Error)
 		}
+	}
+	
+	/// The redirect's query parameters, empty if it has none.
+	private func queryParams(of redirect: URL) -> OAuth2JSON {
+		guard let query = URLComponents(url: redirect, resolvingAgainstBaseURL: true)?.percentEncodedQuery else {
+			return [:]
+		}
+		return type(of: self).params(fromQuery: query)
 	}
 	
 	/**

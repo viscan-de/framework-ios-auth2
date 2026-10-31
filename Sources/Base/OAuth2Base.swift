@@ -248,8 +248,9 @@ open class OAuth2Base: OAuth2Securable {
 	}
 	
 	/**
-	Ends the authorization in progress: it loses its identity, so its work's late answers are dropped, and the screen presented for it is
-	taken down. Main thread.
+	Ends the authorization in progress: it loses its identity, so its work's late answers are dropped; its state is retired, so the next
+	authorization sends another and a late redirect carrying this one is recognized (`isLateRedirect(_:)`); and the screen presented for
+	it is taken down. Main thread.
 	*/
 	private func retireCurrentAuthorization() {
 		authorizationLock.lock()
@@ -257,7 +258,22 @@ open class OAuth2Base: OAuth2Securable {
 		let presentation = _presentation
 		_presentation = nil
 		authorizationLock.unlock()
+		context.retireState()
 		presentation?.dismiss()
+	}
+	
+	/**
+	Whether a redirect's parameters carry the state of an authorization that has ended: a late redirect, which answers nobody and is
+	dropped rather than failing the authorization in progress. A redirect carrying a state that was never issued is not one; it fails as
+	`.invalidState`.
+	
+	- parameter params: The redirect's query or fragment parameters
+	*/
+	public final func isLateRedirect(_ params: OAuth2JSON) -> Bool {
+		guard let state = params["state"] as? String, !state.isEmpty else {
+			return false
+		}
+		return !context.matchesState(state) && context.wasRetired(state)
 	}
 	
 	/**
@@ -742,6 +758,32 @@ open class OAuth2ContextStore {
 	*/
 	func resetState() {
 		_state = ""
+	}
+	
+	/// The states of authorizations that have ended, most recent last.
+	private var retiredStates = [String]()
+	
+	/// How many retired states are remembered; a redirect older than that many authorizations fails as `.invalidState`.
+	private let retiredStatesKept = 16
+	
+	/**
+	Retires the current state when its authorization ends, so the next authorization sends another one.
+	*/
+	func retireState() {
+		if !_state.isEmpty {
+			retiredStates.append(_state)
+			if retiredStates.count > retiredStatesKept {
+				retiredStates.removeFirst(retiredStates.count - retiredStatesKept)
+			}
+		}
+		resetState()
+	}
+	
+	/**
+	Whether `state` was the state of an authorization that has ended.
+	*/
+	func wasRetired(_ state: String) -> Bool {
+		return retiredStates.contains(state)
 	}
 	
 	// MARK: - PKCE
