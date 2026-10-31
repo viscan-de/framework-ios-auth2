@@ -12,9 +12,8 @@ fork, and are left that way. The entries from 5.3.5 down are upstream's.
 
 - `abortAuthorization()` takes down the `ASWebAuthenticationSession` sheet (cancels it) and answers with `.requestCancelled`.
   It cancels the aborted authorization's token requests but never a refresh-token request: that one finishes and stores its
-  tokens, and only its answer is dropped. With no authorization in progress it does nothing, not even the after-callbacks; an
-  authorization in progress that has no identity is ended all the same. Off the main thread it returns at once and answers on
-  the main thread.
+  tokens, and only its answer is dropped. With no authorization in progress it does nothing, not even the after-callbacks. Off the
+  main thread it returns at once and answers on the main thread.
 - Any `didAuthorize` or `didFail` that ends an authorization cancels its `ASWebAuthenticationSession` sheet too. Taking down the
   Safari view controller and the web view controller or window stays the caller's, or `authorizeEmbeddedAutoDismiss`'s.
 - An authorization has fully ended before its callback runs: `authorize()` from the callback starts the next one, and
@@ -30,15 +29,17 @@ fork, and are left that way. The entries from 5.3.5 down are upstream's.
 - Ending an authorization, or a redirect matching its state, retires the state, so the next authorization sends a new one. The
   code and implicit grants drop a redirect carrying a retired state (`isLateRedirect(_:)`), so a late or duplicate redirect
   reaching `handleRedirectURL` answers nobody; a redirect with a state that was never issued still fails as `.invalidState`.
-- Ending an authorization retires only its own identity and screen, so a sign-in started on another thread while it ends (as
-  `OAuth2DataLoader` does after a 401) keeps both.
+- Starting and ending an authorization are single steps under a lock: its callback (`didAuthorizeOrFail`) and its identity are
+  set together (`authorize()` uses the new `beginAuthorization(callback:)`, which answers `.alreadyAuthorizing` while one is in
+  progress) and cleared together with its screen. A sign-in started on another thread while one ends (as `OAuth2DataLoader`
+  does after a 401) keeps its identity and screen, and an abort either ends a sign-in that is starting or leaves it alone.
 - Device polling started for an authorization stops when it ends; started outside one, it answers as before.
 - An `ASWebAuthenticationSession` that does not start fails the authorization with `.unableToOpenAuthorizeURL`, and on iOS so does
   a redirect URL that does not parse; both used to leave the authorization waiting forever.
 - The requests an abort can cancel are guarded by a lock, and a request that answered before `perform(request:callback:)`
   returned is no longer counted abortable.
 - New public API:
-  - `OAuth2Base`: `currentAuthorization`, `isCurrentAuthorization(_:)`, `didAuthorize(withParameters:for:)`,
+  - `OAuth2Base`: `beginAuthorization(callback:)`, `currentAuthorization`, `isCurrentAuthorization(_:)`, `didAuthorize(withParameters:for:)`,
     `didFail(with:for:)`, `isPresentingAuthorization`, `beginPresentation(dismiss:)`, `isCurrentPresentation(_:)`,
     `endPresentation(_:)`, `isLateRedirect(_:)`;
   - `OAuth2Requestable.keepingRunningOnAbort(_:)`;
