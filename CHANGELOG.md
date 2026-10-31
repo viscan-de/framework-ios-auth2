@@ -4,6 +4,22 @@ Changelog
 Version numbering represents the Swift version, plus a running number representing updates, fixes and new features at the same time.
 You can also refer to commit logs to get details on what was implemented, fixed and improved.
 
+#### 1.1.4
+
+- `abortAuthorization()` answers at once with `.requestCancelled`, cancels the running token requests and takes down the
+  `ASWebAuthenticationSession` sheet. Any `didAuthorize` or `didFail` that ends an authorization cancels its sheet too.
+- Each authorization has an identity (`currentAuthorization`). A late answer of one that has ended is dropped: its sheet's cancel
+  or redirect, its token request (no tokens are installed), a refresh or registration still running (no sheet is presented).
+  Flows end an authorization through the new `didAuthorize(withParameters:for:)` and `didFail(with:for:)`.
+- New `isPresentingAuthorization`: whether a sign-in screen is up for the authorization in progress. Authorizers register their
+  screens with `beginPresentation(dismiss:)`.
+- An `ASWebAuthenticationSession` whose `start()` fails fails the authorization with `.unableToOpenAuthorizeURL`, instead of
+  leaving it waiting forever.
+- A request that answered before `perform(request:callback:)` returned is no longer counted abortable, and the abortable requests
+  are guarded by a lock.
+- `OAuth2Authorizer` creates its session through `makeAuthenticationSession(at:callbackURLScheme:prefersEphemeralWebBrowserSession:completionHandler:)`,
+  which tests can override.
+
 #### 5.3.5
 
 - Fix visionOS build issue
