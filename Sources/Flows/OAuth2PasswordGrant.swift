@@ -104,12 +104,14 @@ open class OAuth2PasswordGrant: OAuth2 {
 			try askForCredentials()
 		}
 		else {
+			// The token request answers only this authorization, not one started after it ended.
+			let authorization = currentAuthorization
 			obtainAccessToken(params: params) { params, error in
 				if let error = error {
-					self.didFail(with: error)
+					self.didFail(with: error, for: authorization)
 				}
 				else {
-					self.didAuthorize(withParameters: params ?? OAuth2JSON())
+					self.didAuthorize(withParameters: params ?? OAuth2JSON(), for: authorization)
 				}
 			}
 		}
@@ -156,7 +158,8 @@ open class OAuth2PasswordGrant: OAuth2 {
 		self.username = username
 		self.password = password
 		
-		// perform the request
+		// perform the request; it answers only the authorization the credentials were entered for
+		let authorization = currentAuthorization
 		obtainAccessToken(params: customAuthParams) { params, error in
 			
 			// reset credentials on error
@@ -168,7 +171,7 @@ open class OAuth2PasswordGrant: OAuth2 {
 			
 			// automatically end the authorization process with a success
 			else {
-				self.didAuthorize(withParameters: params ?? OAuth2JSON())
+				self.didAuthorize(withParameters: params ?? OAuth2JSON(), for: authorization)
 			}
 		}
 	}

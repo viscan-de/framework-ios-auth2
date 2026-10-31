@@ -134,11 +134,130 @@ open class OAuth2Base: OAuth2Securable {
 	
 	
 	/// This closure is internally used with `authorize(params:callback:)` and only exposed for subclassing reason, do not mess with it!
-	public final var didAuthorizeOrFail: ((_ parameters: OAuth2JSON?, _ error: OAuth2Error?) -> Void)?
+	///
+	/// Setting it starts an authorization with an identity of its own, `currentAuthorization`; clearing it ends that.
+	public final var didAuthorizeOrFail: ((_ parameters: OAuth2JSON?, _ error: OAuth2Error?) -> Void)? {
+		didSet {
+			let starts = (nil != didAuthorizeOrFail)
+			authorizationLock.lock()
+			_currentAuthorization = starts ? OAuth2AuthorizationID(serial: nextSerial()) : nil
+			authorizationLock.unlock()
+		}
+	}
 	
 	/// Returns true if the receiver is currently authorizing.
 	public final var isAuthorizing: Bool {
 		return nil != didAuthorizeOrFail
+	}
+	
+	/// Guards `_currentAuthorization`, `_presentation` and `lastSerial`. An authorization can start on any thread (`OAuth2DataLoader`
+	/// starts one from a URL session's queue), its requests answer on theirs, and its sign-in screens live on the main thread.
+	private let authorizationLock = NSLock()
+	
+	/// Backs `currentAuthorization`. Only touch while holding `authorizationLock`.
+	private var _currentAuthorization: OAuth2AuthorizationID?
+	
+	/// The sign-in screen registered with `beginPresentation(dismiss:)`, with the closure that takes it down. Only touch while holding
+	/// `authorizationLock`.
+	private var _presentation: (id: OAuth2PresentationID, dismiss: () -> Void)?
+	
+	/// The last serial handed to an authorization or a presentation. Only touch while holding `authorizationLock`.
+	private var lastSerial: UInt64 = 0
+	
+	/// Only call while holding `authorizationLock`.
+	private func nextSerial() -> UInt64 {
+		lastSerial += 1
+		return lastSerial
+	}
+	
+	/// The authorization in progress, nil while none is.
+	public final var currentAuthorization: OAuth2AuthorizationID? {
+		authorizationLock.lock()
+		defer { authorizationLock.unlock() }
+		return _currentAuthorization
+	}
+	
+	/**
+	Whether `authorization` is still the authorization in progress.
+	
+	- parameter authorization: What `currentAuthorization` was when the work asking started; work started while no authorization was
+	                           in progress stays current until one starts
+	*/
+	public final func isCurrentAuthorization(_ authorization: OAuth2AuthorizationID?) -> Bool {
+		return currentAuthorization == authorization
+	}
+	
+	/// Whether a sign-in screen the authorizer presented for the authorization in progress is up: from the moment the authorizer
+	/// presents it until it closes by itself or the authorization ends, which takes it down.
+	public final var isPresentingAuthorization: Bool {
+		authorizationLock.lock()
+		defer { authorizationLock.unlock() }
+		guard let presentation = _presentation else {
+			return false
+		}
+		return presentation.id.authorization == _currentAuthorization
+	}
+	
+	/**
+	For authorizers: registers the sign-in screen about to be presented for the authorization in progress, with the closure that takes it
+	down.
+	
+	When that authorization ends, in `didAuthorize(withParameters:)`, `didFail(with:)` or `abortAuthorization()`, `dismiss` runs on the
+	main thread, so no screen outlives its authorization. There is only ever one screen: one still registered is dismissed first.
+	
+	Before acting on anything the screen reports, check `isCurrentPresentation(_:)`. When the screen closes by itself, call
+	`endPresentation(_:)`.
+	
+	- parameter dismiss: Takes the screen down, as far as the authorizer owns that, and lets go of what the authorizer holds for it
+	- returns:           The screen's identity
+	*/
+	public final func beginPresentation(dismiss: @escaping () -> Void) -> OAuth2PresentationID {
+		authorizationLock.lock()
+		let previous = _presentation
+		let presentation = OAuth2PresentationID(serial: nextSerial(), authorization: _currentAuthorization)
+		_presentation = (presentation, dismiss)
+		authorizationLock.unlock()
+		if let previous = previous {
+			callOnMainThread() {
+				previous.dismiss()
+			}
+		}
+		return presentation
+	}
+	
+	/**
+	Whether what `presentation` reports still counts: it is still the registered screen, and the authorization it was presented for is
+	still in progress. A screen whose authorization has ended has been dismissed, and its late callbacks are nobody's answer.
+	*/
+	public final func isCurrentPresentation(_ presentation: OAuth2PresentationID) -> Bool {
+		authorizationLock.lock()
+		defer { authorizationLock.unlock() }
+		return _presentation?.id == presentation && _currentAuthorization == presentation.authorization
+	}
+	
+	/**
+	For authorizers: the screen closed by itself, or never came up, so there is nothing left to take down. Does nothing if `presentation`
+	is no longer the registered screen.
+	*/
+	public final func endPresentation(_ presentation: OAuth2PresentationID) {
+		authorizationLock.lock()
+		defer { authorizationLock.unlock() }
+		if _presentation?.id == presentation {
+			_presentation = nil
+		}
+	}
+	
+	/**
+	Ends the authorization in progress: it loses its identity, so its work's late answers are dropped, and the screen presented for it is
+	taken down. Main thread.
+	*/
+	private func retireCurrentAuthorization() {
+		authorizationLock.lock()
+		_currentAuthorization = nil
+		let presentation = _presentation
+		_presentation = nil
+		authorizationLock.unlock()
+		presentation?.dismiss()
 	}
 	
 	/**
@@ -270,15 +389,18 @@ open class OAuth2Base: OAuth2Securable {
 	- parameter withParameters: The parameters received during authorization
 	*/
 	public final func didAuthorize(withParameters parameters: OAuth2JSON) {
-		if useKeychain {
-			storeTokensToKeychain()
-		}
-		callOnMainThread() {
-			self.didAuthorizeOrFail?(parameters, nil)
-			self.didAuthorizeOrFail = nil
-			self.internalAfterAuthorizeOrFail?(false, nil)
-			self.afterAuthorizeOrFail?(parameters, nil)
-		}
+		endAuthorization(.any, parameters: parameters, error: nil)
+	}
+	
+	/**
+	`didAuthorize(withParameters:)` for work that belongs to an authorization: does nothing if that authorization has ended meanwhile,
+	so a late answer never ends a newer one.
+	
+	- parameter withParameters: The parameters received during authorization
+	- parameter for:            What `currentAuthorization` was when the work started
+	*/
+	public final func didAuthorize(withParameters parameters: OAuth2JSON, for authorization: OAuth2AuthorizationID?) {
+		endAuthorization(.only(authorization), parameters: parameters, error: nil)
 	}
 	
 	/**
@@ -290,29 +412,84 @@ open class OAuth2Base: OAuth2Securable {
 	- parameter error: The error that led to authorization failure; will use `.requestCancelled` on the callbacks if nil is passed
 	*/
 	public final func didFail(with error: OAuth2Error?) {
+		endAuthorization(.any, parameters: nil, error: error)
+	}
+	
+	/**
+	`didFail(with:)` for work that belongs to an authorization: does nothing if that authorization has ended meanwhile, so a late answer
+	never ends a newer one.
+	
+	- parameter error: The error that led to authorization failure; will use `.requestCancelled` on the callbacks if nil is passed
+	- parameter for:   What `currentAuthorization` was when the work started
+	*/
+	public final func didFail(with error: OAuth2Error?, for authorization: OAuth2AuthorizationID?) {
+		endAuthorization(.only(authorization), parameters: nil, error: error)
+	}
+	
+	/// Which authorization an answer may end.
+	private enum AuthorizationScope {
+		
+		/// Whichever is in progress.
+		case any
+		
+		/// Only this one, if it is still in progress.
+		case only(OAuth2AuthorizationID?)
+	}
+	
+	private func isInScope(_ scope: AuthorizationScope) -> Bool {
+		switch scope {
+		case .any:
+			return true
+		case .only(let authorization):
+			return isCurrentAuthorization(authorization)
+		}
+	}
+	
+	/**
+	Ends the authorization in scope with success (`parameters` non-nil) or failure, then calls the callbacks on the main thread.
+	
+	Checked twice: here, so a late success stores no tokens, and on the main thread, where authorizations start and end.
+	*/
+	private func endAuthorization(_ scope: AuthorizationScope, parameters: OAuth2JSON?, error: OAuth2Error?) {
+		guard isInScope(scope) else {
+			logger?.debug("OAuth2", msg: "Ignoring the answer of an authorization that has ended")
+			return
+		}
 		var finalError = error
-		if let error = finalError {
+		if nil != parameters {
+			if useKeychain {
+				storeTokensToKeychain()
+			}
+		}
+		else if let error = finalError {
 			logger?.debug("OAuth2", msg: "\(error)")
 		}
 		else {
 			finalError = OAuth2Error.requestCancelled
 		}
 		callOnMainThread() {
-			self.didAuthorizeOrFail?(nil, finalError)
+			guard self.isInScope(scope) else {
+				self.logger?.debug("OAuth2", msg: "Ignoring the answer of an authorization that has ended")
+				return
+			}
+			self.retireCurrentAuthorization()
+			self.didAuthorizeOrFail?(parameters, finalError)
 			self.didAuthorizeOrFail = nil
-			self.internalAfterAuthorizeOrFail?(true, finalError)
-			self.afterAuthorizeOrFail?(nil, finalError)
+			self.internalAfterAuthorizeOrFail?(nil == parameters, finalError)
+			self.afterAuthorizeOrFail?(parameters, finalError)
 		}
 	}
 	
 	/**
 	Allows to abort authorization currently in progress.
+	
+	Answers at once with `.requestCancelled`, cancels the authorization's running requests and takes down the sign-in screen presented
+	for it. The flows drop what those requests and that screen report later, so it cannot answer another authorization.
 	*/
 	open func abortAuthorization() {
-		if !abortTask() {
-			logger?.debug("OAuth2", msg: "Aborting authorization")
-			didFail(with: nil)
-		}
+		logger?.debug("OAuth2", msg: "Aborting authorization")
+		_ = abortTask()
+		didFail(with: nil)
 	}
 	
 	
@@ -467,6 +644,31 @@ open class OAuth2Base: OAuth2Securable {
 	open func assureRefreshTokenParamsAreValid(_ params: OAuth2JSON) throws {
 	}
 
+}
+
+
+/**
+Identifies one authorization, from the moment `didAuthorizeOrFail` is set (`authorize(params:callback:)` sets it) until
+`didAuthorize(withParameters:)` or `didFail(with:)` ends it.
+
+Work an authorization starts that answers later, such as a token request or a sign-in screen, keeps the identity that was current
+when it started, and answers only while that authorization is still in progress. A late answer of an authorization that has ended is
+dropped, so it can never end a newer one.
+*/
+public struct OAuth2AuthorizationID: Equatable {
+	fileprivate let serial: UInt64
+}
+
+
+/**
+Identifies one sign-in screen an authorizer presented, from `OAuth2Base.beginPresentation(dismiss:)` until it closes by itself or its
+authorization ends.
+*/
+public struct OAuth2PresentationID: Equatable {
+	fileprivate let serial: UInt64
+	
+	/// The authorization the screen was presented for; nil if none was in progress.
+	public let authorization: OAuth2AuthorizationID?
 }
 
 

@@ -34,12 +34,14 @@ open class OAuth2ClientCredentials: OAuth2 {
 	}
 	
 	override open func doAuthorize(params inParams: OAuth2StringDict? = nil) {
+		// The token request answers only this authorization, not one started after it ended.
+		let authorization = currentAuthorization
 		self.obtainAccessToken(params: inParams) { params, error in
 			if let error = error {
-				self.didFail(with: error.asOAuth2Error)
+				self.didFail(with: error.asOAuth2Error, for: authorization)
 			}
 			else {
-				self.didAuthorize(withParameters: params ?? OAuth2JSON())
+				self.didAuthorize(withParameters: params ?? OAuth2JSON(), for: authorization)
 			}
 		}
 	}

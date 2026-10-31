@@ -107,18 +107,21 @@ open class OAuth2: OAuth2Base {
         }
         
         didAuthorizeOrFail = callback
+        // Every step below answers for this authorization only: once it has ended (`abortAuthorization()` answers at
+        // once), a refresh or registration still coming back must neither answer a newer one nor present a sign-in screen.
+        let authorization = currentAuthorization
         logger?.debug("OAuth2", msg: "Starting authorization")
         tryToObtainAccessTokenIfNeeded(params: params) { successParams, error in
             if let successParams = successParams {
-                self.didAuthorize(withParameters: successParams)
+                self.didAuthorize(withParameters: successParams, for: authorization)
             }
             else if let error = error {
-                self.didFail(with: error)
+                self.didFail(with: error, for: authorization)
             }
             else {
                 self.registerClientIfNeeded() { json, error in
                     if let error = error {
-                        self.didFail(with: error)
+                        self.didFail(with: error, for: authorization)
                     }
                     else {
                         // `doAuthorize` presents UI, but `authorize()` is not only called from the
@@ -126,11 +129,15 @@ open class OAuth2: OAuth2Base {
                         // callback when a request comes back 401, which runs on a background thread.
                         // Hop to main rather than asserting our way into a crash there.
                         callAsyncOnMainThread {
+                            guard self.isCurrentAuthorization(authorization) else {
+                                self.logger?.debug("OAuth2", msg: "Not presenting the sign-in screen of an authorization that has ended")
+                                return
+                            }
                             do {
                                 try self.doAuthorize(params: params)
                             }
                             catch let error {
-                                self.didFail(with: error.asOAuth2Error)
+                                self.didFail(with: error.asOAuth2Error, for: authorization)
                             }
                         }
                     }

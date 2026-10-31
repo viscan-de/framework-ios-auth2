@@ -93,6 +93,8 @@ open class OAuth2CodeGrant: OAuth2 {
 	Uses `accessTokenRequest(params:)` to create the request, which you can subclass to change implementation specifics.
 	*/
 	public func exchangeCodeForToken(_ code: String) {
+		// The token request answers only the authorization the code was issued for.
+		let authorization = currentAuthorization
 		do {
 			guard !code.isEmpty else {
 				throw OAuth2Error.prerequisiteFailed("I don't have a code to exchange, let the user authorize first")
@@ -102,6 +104,12 @@ open class OAuth2CodeGrant: OAuth2 {
 			logger?.debug("OAuth2", msg: "Exchanging code \(code) for access token at \(post.url!)")
 			
 			perform(request: post) { response in
+				// Checked before parsing: parsing installs the tokens, and nobody waits on the tokens of an
+				// authorization that has ended.
+				guard self.isCurrentAuthorization(authorization) else {
+					self.logger?.debug("OAuth2", msg: "Dropping the token response of an authorization that has ended")
+					return
+				}
 				do {
 					let data = try response.responseData()
 					let params = try self.parseAccessTokenResponse(data: data)
@@ -109,15 +117,15 @@ open class OAuth2CodeGrant: OAuth2 {
 						throw OAuth2Error.generic("Failed with status \(response.response.statusCode)")
 					}
 					self.logger?.debug("OAuth2", msg: "Did exchange code for access [\(nil != self.clientConfig.accessToken)] and refresh [\(nil != self.clientConfig.refreshToken)] tokens")
-					self.didAuthorize(withParameters: params)
+					self.didAuthorize(withParameters: params, for: authorization)
 				}
 				catch let error {
-					self.didFail(with: error.asOAuth2Error)
+					self.didFail(with: error.asOAuth2Error, for: authorization)
 				}
 			}
 		}
 		catch let error {
-			didFail(with: error.asOAuth2Error)
+			didFail(with: error.asOAuth2Error, for: authorization)
 		}
 	}
 	

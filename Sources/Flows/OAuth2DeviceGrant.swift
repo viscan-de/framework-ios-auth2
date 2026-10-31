@@ -82,6 +82,8 @@ open class OAuth2DeviceGrant: OAuth2 {
 	- parameter callback: The callback to call after the device authorization response has been received
 	*/
 	public func start(useNonTextualTransmission: Bool = false, params: OAuth2StringDict? = nil, completion: @escaping (DeviceAuthorization?, Error?) -> Void) {
+		// Polling answers only the authorization in progress when it started, never one started meanwhile.
+		let authorization = currentAuthorization
 		authorizeDevice(params: params) { result, error in
 			guard let result else {
 				if let error {
@@ -118,10 +120,10 @@ open class OAuth2DeviceGrant: OAuth2 {
 			let pollingInterval = result["interval"] as? TimeInterval ?? 5
 			self.getDeviceAccessToken(deviceCode: deviceCode, interval: pollingInterval) { params, error in
 				if let params {
-					self.didAuthorize(withParameters: params)
+					self.didAuthorize(withParameters: params, for: authorization)
 				}
 				else if let error {
-					self.didFail(with: error.asOAuth2Error)
+					self.didFail(with: error.asOAuth2Error, for: authorization)
 				}
 			}
 			
