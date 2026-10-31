@@ -82,8 +82,10 @@ open class OAuth2DeviceGrant: OAuth2 {
 	- parameter callback: The callback to call after the device authorization response has been received
 	*/
 	public func start(useNonTextualTransmission: Bool = false, params: OAuth2StringDict? = nil, completion: @escaping (DeviceAuthorization?, Error?) -> Void) {
-		// Polling answers only the authorization in progress when it started, never one started meanwhile.
+		// Started for an authorization, polling answers only that one and stops once it has ended. Started outside one, it
+		// answers as it always did: whichever authorization is in progress when the token arrives.
 		let authorization = currentAuthorization
+		let isWanted: (() -> Bool)? = (nil == authorization) ? nil : { self.isCurrentAuthorization(authorization) }
 		authorizeDevice(params: params) { result, error in
 			guard let result else {
 				if let error {
@@ -118,12 +120,20 @@ open class OAuth2DeviceGrant: OAuth2 {
 			}
 			
 			let pollingInterval = result["interval"] as? TimeInterval ?? 5
-			self.getDeviceAccessToken(deviceCode: deviceCode, interval: pollingInterval) { params, error in
+			self.getDeviceAccessToken(deviceCode: deviceCode, interval: pollingInterval, while: isWanted) { params, error in
 				if let params {
-					self.didAuthorize(withParameters: params, for: authorization)
+					if nil == isWanted {
+						self.didAuthorize(withParameters: params)
+					} else {
+						self.didAuthorize(withParameters: params, for: authorization)
+					}
 				}
 				else if let error {
-					self.didFail(with: error.asOAuth2Error, for: authorization)
+					if nil == isWanted {
+						self.didFail(with: error.asOAuth2Error)
+					} else {
+						self.didFail(with: error.asOAuth2Error, for: authorization)
+					}
 				}
 			}
 			
@@ -153,39 +163,67 @@ open class OAuth2DeviceGrant: OAuth2 {
 		}
 	}
 	
-	private func getDeviceAccessToken(deviceCode: String, interval: TimeInterval, completion: @escaping (OAuth2JSON?, Error?) -> Void) {
+	/**
+	Polls for the device's access token until it arrives or polling fails.
+	
+	- parameter while:      Nil, or checked on the main thread before each response is parsed (parsing installs the token; `completion`
+	                        then runs in the same turn of the main thread) and before each poll after the first. Once it says no, polling
+	                        stops and `completion` is not called.
+	- parameter completion: Called once, with the token response or the error that ended polling
+	*/
+	private func getDeviceAccessToken(deviceCode: String, interval: TimeInterval, while isWanted: (() -> Bool)?, completion: @escaping (OAuth2JSON?, Error?) -> Void) {
 		do {
 			let post = try deviceAccessTokenRequest(with: deviceCode).asURLRequest(for: self)
 			logger?.debug("OAuth2", msg: "Obtaining access token for device with code \(deviceCode) from \(post.url!)")
 			
 			perform(request: post) { response in
-				do {
-					let data = try response.responseData()
-					let params = try self.parseAccessTokenResponse(data: data)
-					completion(params, nil)
+				guard let isWanted = isWanted else {
+					self.handleDeviceAccessTokenResponse(response, deviceCode: deviceCode, interval: interval, while: nil, completion: completion)
+					return
 				}
-				catch let error {
-					let oaerror = error.asOAuth2Error
-					
-					if oaerror == .authorizationPending(nil) {
-						self.logger?.debug("OAuth2", msg: "AuthorizationPending, repeating in \(interval) seconds.")
-						DispatchQueue.main.asyncAfter(deadline: .now() + interval) {
-							self.getDeviceAccessToken(deviceCode: deviceCode, interval: interval, completion: completion)
-						}
-					} else if oaerror == .slowDown(nil) {
-						let updatedInterval = interval + 5 // The 5 seconds increase is required by the RFC8628 standard (https://www.rfc-editor.org/rfc/rfc8628#section-3.5)
-						self.logger?.debug("OAuth2", msg: "SlowDown, repeating in \(updatedInterval) seconds.")
-						DispatchQueue.main.asyncAfter(deadline: .now() + updatedInterval) {
-							self.getDeviceAccessToken(deviceCode: deviceCode, interval: updatedInterval, completion: completion)
-						}
-					} else {
-						completion(nil, oaerror)
+				callAsyncOnMainThread {
+					guard isWanted() else {
+						self.logger?.debug("OAuth2", msg: "Dropping the device token response of an authorization that has ended")
+						return
 					}
+					self.handleDeviceAccessTokenResponse(response, deviceCode: deviceCode, interval: interval, while: isWanted, completion: completion)
 				}
 			}
 		}
 		catch let error {
 			completion(nil, error.asOAuth2Error)
+		}
+	}
+	
+	private func handleDeviceAccessTokenResponse(_ response: OAuth2Response, deviceCode: String, interval: TimeInterval, while isWanted: (() -> Bool)?, completion: @escaping (OAuth2JSON?, Error?) -> Void) {
+		do {
+			let data = try response.responseData()
+			let params = try parseAccessTokenResponse(data: data)
+			completion(params, nil)
+		}
+		catch let error {
+			let oaerror = error.asOAuth2Error
+			
+			if oaerror == .authorizationPending(nil) {
+				logger?.debug("OAuth2", msg: "AuthorizationPending, repeating in \(interval) seconds.")
+				pollAgain(deviceCode: deviceCode, interval: interval, while: isWanted, completion: completion)
+			} else if oaerror == .slowDown(nil) {
+				let updatedInterval = interval + 5 // The 5 seconds increase is required by the RFC8628 standard (https://www.rfc-editor.org/rfc/rfc8628#section-3.5)
+				logger?.debug("OAuth2", msg: "SlowDown, repeating in \(updatedInterval) seconds.")
+				pollAgain(deviceCode: deviceCode, interval: updatedInterval, while: isWanted, completion: completion)
+			} else {
+				completion(nil, oaerror)
+			}
+		}
+	}
+	
+	private func pollAgain(deviceCode: String, interval: TimeInterval, while isWanted: (() -> Bool)?, completion: @escaping (OAuth2JSON?, Error?) -> Void) {
+		DispatchQueue.main.asyncAfter(deadline: .now() + interval) {
+			if let isWanted = isWanted, !isWanted() {
+				self.logger?.debug("OAuth2", msg: "Stopping to poll for the device token of an authorization that has ended")
+				return
+			}
+			self.getDeviceAccessToken(deviceCode: deviceCode, interval: interval, while: isWanted, completion: completion)
 		}
 	}
 }
