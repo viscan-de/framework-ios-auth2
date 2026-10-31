@@ -6,19 +6,43 @@ You can also refer to commit logs to get details on what was implemented, fixed 
 
 #### 1.1.4
 
-- `abortAuthorization()` answers at once with `.requestCancelled`, cancels the running token requests and takes down the
-  `ASWebAuthenticationSession` sheet. Any `didAuthorize` or `didFail` that ends an authorization cancels its sheet too.
-- Each authorization has an identity (`currentAuthorization`). A late answer of one that has ended is dropped: its sheet's cancel
-  or redirect, its token request (no tokens are installed), a refresh or registration still running (no sheet is presented).
-  Flows end an authorization through the new `didAuthorize(withParameters:for:)` and `didFail(with:for:)`.
-- New `isPresentingAuthorization`: whether a sign-in screen is up for the authorization in progress. Authorizers register their
-  screens with `beginPresentation(dismiss:)`.
-- An `ASWebAuthenticationSession` whose `start()` fails fails the authorization with `.unableToOpenAuthorizeURL`, instead of
-  leaving it waiting forever.
-- A request that answered before `perform(request:callback:)` returned is no longer counted abortable, and the abortable requests
-  are guarded by a lock.
-- `OAuth2Authorizer` creates its session through `makeAuthenticationSession(at:callbackURLScheme:prefersEphemeralWebBrowserSession:completionHandler:)`,
-  which tests can override.
+Versions of this fork are its git tags (1.0.0 onwards); 1.0.0 to 1.1.3 have no entries here, see the commit log. The podspec's
+`s.version` and the Xcode project's `MARKETING_VERSION` still read 5.3.5, the upstream release the fork started from, for the whole
+fork, and are left that way. The entries from 5.3.5 down are upstream's.
+
+- `abortAuthorization()` takes down the `ASWebAuthenticationSession` sheet (cancels it) and answers with `.requestCancelled`.
+  It cancels the aborted authorization's token requests but never a refresh-token request: that one finishes and stores its
+  tokens, and only its answer is dropped. With no authorization in progress it does nothing, not even the after-callbacks. Off
+  the main thread it returns at once and answers on the main thread.
+- Any `didAuthorize` or `didFail` that ends an authorization cancels its `ASWebAuthenticationSession` sheet too. Taking down the
+  Safari view controller and the web view controller or window stays the caller's, or `authorizeEmbeddedAutoDismiss`'s.
+- An authorization has fully ended before its callback runs: `authorize()` from the callback starts the next one, and
+  `abortAuthorization()` from it does nothing. `internalAfterAuthorizeOrFail` now runs before the callback. Called off the main
+  thread, `didAuthorize` and `didFail` answer asynchronously on the main thread instead of waiting on it.
+- Each authorization has an identity (`currentAuthorization`), and what it started answers only while it is in progress:
+  - the `ASWebAuthenticationSession` sheet's completion, and the Safari view controller's Done and swipe, the iOS web view
+    controller's intercept and cancel and the macOS web view's intercept and cancel are ignored once it has ended; the macOS web
+    view window then closes when the user cancels it;
+  - the token responses of the code grant, client credentials, the password grant and device polling are checked, parsed and
+    answered in one turn of the main thread, and install no tokens once it has ended;
+  - a refresh or registration still running when it ended presents no sign-in screen.
+- Ending an authorization retires its state, so the next one sends a new one. The code and implicit grants drop a redirect
+  carrying a retired state (`isLateRedirect(_:)`), so a late redirect reaching `handleRedirectURL` answers nobody; a redirect
+  with a state that was never issued still fails as `.invalidState`.
+- Device polling started for an authorization stops when it ends; started outside one, it answers as before.
+- An `ASWebAuthenticationSession` that does not start fails the authorization with `.unableToOpenAuthorizeURL`, and on iOS so does
+  a redirect URL that does not parse; both used to leave the authorization waiting forever.
+- The requests an abort can cancel are guarded by a lock, and a request that answered before `perform(request:callback:)`
+  returned is no longer counted abortable.
+- New public API:
+  - `OAuth2Base`: `currentAuthorization`, `isCurrentAuthorization(_:)`, `didAuthorize(withParameters:for:)`,
+    `didFail(with:for:)`, `isPresentingAuthorization`, `beginPresentation(dismiss:)`, `isCurrentPresentation(_:)`,
+    `endPresentation(_:)`, `isLateRedirect(_:)`;
+  - `OAuth2Requestable.keepingRunningOnAbort(_:)`;
+  - `OAuth2AuthorizationID`, `OAuth2PresentationID`;
+  - the `OAuth2WebAuthenticationSession` protocol, which `ASWebAuthenticationSession` adopts;
+  - `OAuth2Authorizer.makeAuthenticationSession(at:callbackURLScheme:prefersEphemeralWebBrowserSession:completionHandler:)`
+    (iOS, macOS), which tests can override.
 
 #### 5.3.5
 
