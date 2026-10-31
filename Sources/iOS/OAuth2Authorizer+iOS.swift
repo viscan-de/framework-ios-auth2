@@ -99,7 +99,10 @@ open class OAuth2Authorizer: OAuth2AuthorizerUI {
 				throw OAuth2Error.noAuthorizationContext
 			}
 
-			authenticationSessionEmbedded(at: url, withRedirect: redirect, prefersEphemeralWebBrowserSession: config.ui.prefersEphemeralWebBrowserSession)
+			// A session that does not start never calls back, so the authorization would wait forever.
+			guard authenticationSessionEmbedded(at: url, withRedirect: redirect, prefersEphemeralWebBrowserSession: config.ui.prefersEphemeralWebBrowserSession) else {
+				throw OAuth2Error.unableToOpenAuthorizeURL
+			}
 		} else {
 			#if os(visionOS)
 			throw OAuth2Error.invalidAuthorizationConfiguration("visionOS only supports ASWebAuthenticationSession")
@@ -180,7 +183,8 @@ open class OAuth2Authorizer: OAuth2AuthorizerUI {
 	The mechanism works just like when you're using Safari itself to log the user in, hence you **need to implement**
 	`application(application:openURL:sourceApplication:annotation:)` in your application delegate.
 	
-	This method dismisses the view controller automatically - this cannot be disabled.
+	This method dismisses the view controller automatically - this cannot be disabled. That includes the authorization ending any other
+	way, such as `abortAuthorization()`: the session is cancelled then, and what it reports afterwards is ignored.
 	
 	- parameter at:       The authorize URL to open
 	- parameter redirect: The full redirect URL to use
@@ -194,7 +198,19 @@ open class OAuth2Authorizer: OAuth2AuthorizerUI {
 			oauth2.logger?.warn("OAuth2", msg: "Unable to parse redirect URL ”(redirect)“")
 			return false
 		}
+		
+		// Both are set before the session starts, so before it can call back.
+		var presentation: OAuth2PresentationID?
+		weak var startedSession: OAuth2WebAuthenticationSession?
 		let completionHandler: (URL?, Error?) -> Void = { url, error in
+			// The session of an authorization that has ended was cancelled when it ended. What it reports now, the cancel or a
+			// redirect the user reached just before, is nobody's answer: exchanging that code would sign in with no one waiting.
+			guard let presentation = presentation, self.oauth2.isCurrentPresentation(presentation) else {
+				self.oauth2.logger?.debug("OAuth2", msg: "Ignoring the authentication session of an authorization that has ended")
+				return
+			}
+			self.oauth2.endPresentation(presentation)
+			self.releaseAuthenticationSession(startedSession)
 			if let url = url {
 				do {
 					try self.oauth2.handleRedirectURL(url as URL)
@@ -206,22 +222,43 @@ open class OAuth2Authorizer: OAuth2AuthorizerUI {
 				if let authenticationSessionError = error as? ASWebAuthenticationSessionError {
 					switch authenticationSessionError.code {
 					case .canceledLogin:
-						self.oauth2.didFail(with: .requestCancelled)
+						self.oauth2.didFail(with: .requestCancelled, for: presentation.authorization)
 					default:
-						self.oauth2.didFail(with: error?.asOAuth2Error)
+						self.oauth2.didFail(with: error?.asOAuth2Error, for: presentation.authorization)
 					}
 				}
 				else {
-					self.oauth2.didFail(with: error?.asOAuth2Error)
+					self.oauth2.didFail(with: error?.asOAuth2Error, for: presentation.authorization)
 				}
 			}
-			self.authenticationSession = nil
-			self.webAuthenticationPresentationContextProvider = nil
 		}
 		
 		let session = makeAuthenticationSession(at: url, callbackURLScheme: redirectURL.scheme, prefersEphemeralWebBrowserSession: prefersEphemeralWebBrowserSession, completionHandler: completionHandler)
+		startedSession = session
 		authenticationSession = session
-		return session.start()
+		let registered = oauth2.beginPresentation {
+			session.cancel()
+			self.releaseAuthenticationSession(session)
+		}
+		presentation = registered
+		guard session.start() else {
+			oauth2.logger?.warn("OAuth2", msg: "The authentication session did not start")
+			oauth2.endPresentation(registered)
+			releaseAuthenticationSession(session)
+			return false
+		}
+		return true
+	}
+	
+	/**
+	Lets go of `session` and its context provider, unless the authorizer has started another session since.
+	*/
+	private func releaseAuthenticationSession(_ session: OAuth2WebAuthenticationSession?) {
+		guard let session = session, session === authenticationSession else {
+			return
+		}
+		authenticationSession = nil
+		webAuthenticationPresentationContextProvider = nil
 	}
 	
 	/**
@@ -267,10 +304,11 @@ open class OAuth2Authorizer: OAuth2AuthorizerUI {
 	*/
 	@discardableResult
 	public func authorizeSafariEmbedded(from controller: UIViewController, at url: URL) throws -> SFSafariViewController {
-		safariViewDelegate = OAuth2SFViewControllerDelegate(authorizer: self)
+		let delegate = OAuth2SFViewControllerDelegate(authorizer: self)
+		safariViewDelegate = delegate
 		let web = SFSafariViewController(url: url)
 		web.title = oauth2.authConfig.ui.title
-		web.delegate = safariViewDelegate
+		web.delegate = delegate
 		if let barTint = oauth2.authConfig.ui.barTintColor {
 			web.preferredBarTintColor = barTint
 		}
@@ -279,9 +317,16 @@ open class OAuth2Authorizer: OAuth2AuthorizerUI {
 		}
 		web.modalPresentationStyle = oauth2.authConfig.ui.modalPresentationStyle
 		
+		// Taking the controller down is the caller's, or `authorizeEmbeddedAutoDismiss`'s. When the authorization ends, the
+		// authorizer stops listening to it.
+		delegate.presentation = oauth2.beginPresentation {
+			if self.safariViewDelegate === delegate {
+				self.safariViewDelegate = nil
+			}
+		}
 		willPresent(viewController: web, in: nil)
 		controller.present(web, animated: true, completion: nil)
-		web.presentationController?.delegate = safariViewDelegate
+		web.presentationController?.delegate = delegate
 		return web
 	}
 	
@@ -289,10 +334,16 @@ open class OAuth2Authorizer: OAuth2AuthorizerUI {
 	/**
 	Called from our delegate, which reacts to users pressing "Done". We can assume this is always a cancel as nomally the Safari view
 	controller is dismissed automatically.
+	
+	A controller still up after its authorization ended, which a caller not auto-dismissing may leave, cancels nothing.
 	*/
-	func safariViewControllerDidCancel(_ safari: SFSafariViewController) {
+	func safariViewControllerDidCancel(_ safari: SFSafariViewController, presentation: OAuth2PresentationID?) {
+		guard let presentation = presentation, oauth2.isCurrentPresentation(presentation) else {
+			return
+		}
+		oauth2.endPresentation(presentation)
 		safariViewDelegate = nil
-		oauth2.didFail(with: nil)
+		oauth2.didFail(with: nil, for: presentation.authorization)
 	}
 	
 	
@@ -330,7 +381,14 @@ open class OAuth2Authorizer: OAuth2AuthorizerUI {
 		web.showCancelButton = oauth2.authConfig.ui.showCancelButton
 		web.startURL = url
 		web.interceptURLString = intercept
+		
+		// Set before the controller is presented, so before it can call back. A controller still up after its authorization ended,
+		// which a caller not auto-dismissing may leave, answers nobody.
+		var presentation: OAuth2PresentationID?
 		web.onIntercept = { url in
+			guard let presentation = presentation, self.oauth2.isCurrentPresentation(presentation) else {
+				return true
+			}
 			do {
 				try self.oauth2.handleRedirectURL(url as URL)
 				return true
@@ -341,8 +399,12 @@ open class OAuth2Authorizer: OAuth2AuthorizerUI {
 			return false
 		}
 		web.onWillDismiss = { didCancel in
+			guard let presentation = presentation, self.oauth2.isCurrentPresentation(presentation) else {
+				return
+			}
+			self.oauth2.endPresentation(presentation)
 			if didCancel {
-				self.oauth2.didFail(with: nil)
+				self.oauth2.didFail(with: nil, for: presentation.authorization)
 			}
 		}
 		
@@ -355,6 +417,8 @@ open class OAuth2Authorizer: OAuth2AuthorizerUI {
 			navi.navigationBar.tintColor = tint
 		}
 		
+		// Taking the controller down is the caller's, or `authorizeEmbeddedAutoDismiss`'s.
+		presentation = oauth2.beginPresentation {}
 		willPresent(viewController: web, in: navi)
 		controller.present(navi, animated: true)
 		
@@ -373,19 +437,22 @@ class OAuth2SFViewControllerDelegate: NSObject, SFSafariViewControllerDelegate, 
 	
 	weak var authorizer: OAuth2Authorizer?
 	
+	/// The Safari view controller's registration with the authorizer's `oauth2`.
+	var presentation: OAuth2PresentationID?
+	
 	init(authorizer: OAuth2Authorizer) {
 		self.authorizer = authorizer
 	}
 	
 	@available(iOS 9.0, *)
 	func safariViewControllerDidFinish(_ controller: SFSafariViewController) {
-		authorizer?.safariViewControllerDidCancel(controller)
+		authorizer?.safariViewControllerDidCancel(controller, presentation: presentation)
 	}
 
     // called in case ViewController is dismissed via pulling down the presented sheet.
     func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
         guard let safariViewController = presentationController.presentedViewController as? SFSafariViewController else { return }
-        authorizer?.safariViewControllerDidCancel(safariViewController)
+        authorizer?.safariViewControllerDidCancel(safariViewController, presentation: presentation)
     }
 }
 #endif

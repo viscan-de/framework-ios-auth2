@@ -672,6 +672,30 @@ class OAuth2AuthenticationSessionTests: XCTestCase {
 		XCTAssertEqual([.requestCancelled], secondAnswers)
 	}
 	
+	func testIsPresentingAuthorizationWhileTheSheetIsUp() {
+		let (oauth, authorizer, performer) = codeGrant()
+		XCTAssertFalse(oauth.isPresentingAuthorization)
+		oauth.authorize() { _, _ in }
+		XCTAssertTrue(oauth.isPresentingAuthorization)
+		
+		authorizer.sessions[0].completionHandler(redirectURL(oauth), nil)
+		XCTAssertFalse(oauth.isPresentingAuthorization, "The sheet has closed; the token request runs without one")
+		XCTAssertTrue(oauth.isAuthorizing)
+		
+		performer.complete(0, with: tokenResponse)
+		XCTAssertFalse(oauth.isPresentingAuthorization)
+		XCTAssertFalse(oauth.isAuthorizing)
+	}
+	
+	func testIsPresentingAuthorizationEndsWithAnAbort() {
+		let (oauth, _, _) = codeGrant()
+		oauth.authorize() { _, _ in }
+		XCTAssertTrue(oauth.isPresentingAuthorization)
+		
+		oauth.abortAuthorization()
+		XCTAssertFalse(oauth.isPresentingAuthorization)
+	}
+	
 	func testASessionThatCannotStartFailsTheAuthorization() {
 		let (oauth, authorizer, _) = codeGrant()
 		authorizer.sessionsStart = false
@@ -680,6 +704,7 @@ class OAuth2AuthenticationSessionTests: XCTestCase {
 		
 		XCTAssertEqual([.unableToOpenAuthorizeURL], answers)
 		XCTAssertFalse(oauth.isAuthorizing)
+		XCTAssertFalse(oauth.isPresentingAuthorization)
 	}
 }
 

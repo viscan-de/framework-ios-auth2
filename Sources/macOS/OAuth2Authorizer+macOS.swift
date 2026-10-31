@@ -85,9 +85,12 @@ open class OAuth2Authorizer: OAuth2AuthorizerUI {
 				throw OAuth2Error.noRedirectURL
 			}
 			
-			try startAuthenticationSession(at: url,
-										   withRedirect: redirect,
-										   prefersEphemeralWebBrowserSession: config.ui.prefersEphemeralWebBrowserSession)
+			// A session that does not start never calls back, so the authorization would wait forever.
+			guard try startAuthenticationSession(at: url,
+												 withRedirect: redirect,
+												 prefersEphemeralWebBrowserSession: config.ui.prefersEphemeralWebBrowserSession) else {
+				throw OAuth2Error.unableToOpenAuthorizeURL
+			}
 			return
 		}
 		
@@ -125,7 +128,18 @@ open class OAuth2Authorizer: OAuth2AuthorizerUI {
 			throw OAuth2Error.invalidRedirectURL(redirect)
 		}
 		
+		// Both are set before the session starts, so before it can call back.
+		var presentation: OAuth2PresentationID?
+		weak var startedSession: OAuth2WebAuthenticationSession?
 		let completionHandler: (URL?, Error?) -> Void = { url, error in
+			// The session of an authorization that has ended was cancelled when it ended. What it reports now, the cancel or a
+			// redirect the user reached just before, is nobody's answer: exchanging that code would sign in with no one waiting.
+			guard let presentation, self.oauth2.isCurrentPresentation(presentation) else {
+				self.oauth2.logger?.debug("OAuth2", msg: "Ignoring the authentication session of an authorization that has ended")
+				return
+			}
+			self.oauth2.endPresentation(presentation)
+			self.releaseAuthenticationSession(startedSession)
 			if let url {
 				do {
 					try self.oauth2.handleRedirectURL(url)
@@ -136,21 +150,42 @@ open class OAuth2Authorizer: OAuth2AuthorizerUI {
 				if let authenticationSessionError = error as? ASWebAuthenticationSessionError {
 					switch authenticationSessionError.code {
 					case .canceledLogin:
-						self.oauth2.didFail(with: .requestCancelled)
+						self.oauth2.didFail(with: .requestCancelled, for: presentation.authorization)
 					default:
-						self.oauth2.didFail(with: error?.asOAuth2Error)
+						self.oauth2.didFail(with: error?.asOAuth2Error, for: presentation.authorization)
 					}
 				} else {
-					self.oauth2.didFail(with: error?.asOAuth2Error)
+					self.oauth2.didFail(with: error?.asOAuth2Error, for: presentation.authorization)
 				}
 			}
-			self.authenticationSession = nil
-			self.webAuthenticationPresentationContextProvider = nil
 		}
 		
 		let session = makeAuthenticationSession(at: url, callbackURLScheme: redirectURL.scheme, prefersEphemeralWebBrowserSession: prefersEphemeralWebBrowserSession, completionHandler: completionHandler)
+		startedSession = session
 		authenticationSession = session
-		return session.start()
+		let registered = oauth2.beginPresentation {
+			session.cancel()
+			self.releaseAuthenticationSession(session)
+		}
+		presentation = registered
+		guard session.start() else {
+			oauth2.logger?.warn("OAuth2", msg: "The authentication session did not start")
+			oauth2.endPresentation(registered)
+			releaseAuthenticationSession(session)
+			return false
+		}
+		return true
+	}
+	
+	/**
+	Lets go of `session` and its context provider, unless the authorizer has started another session since.
+	*/
+	private func releaseAuthenticationSession(_ session: OAuth2WebAuthenticationSession?) {
+		guard let session, session === authenticationSession else {
+			return
+		}
+		authenticationSession = nil
+		webAuthenticationPresentationContextProvider = nil
 	}
 	
 	/**
@@ -229,7 +264,14 @@ open class OAuth2Authorizer: OAuth2AuthorizerUI {
 		controller.oauth = oauth2
 		controller.startURL = url
 		controller.interceptURLString = oauth2.redirect!
+		
+		// Closing the window is the caller's, or `authorizeEmbeddedAutoDismiss`'s. One still up after its authorization ended,
+		// which a caller not auto-dismissing may leave, answers nobody.
+		let presentation = oauth2.beginPresentation {}
 		controller.onIntercept = { url in
+			guard self.oauth2.isCurrentPresentation(presentation) else {
+				return true
+			}
 			do {
 				try self.oauth2.handleRedirectURL(url)
 				return true
@@ -240,7 +282,11 @@ open class OAuth2Authorizer: OAuth2AuthorizerUI {
 			return false
 		}
 		controller.onWillCancel = {
-			self.oauth2.didFail(with: nil)
+			guard self.oauth2.isCurrentPresentation(presentation) else {
+				return
+			}
+			self.oauth2.endPresentation(presentation)
+			self.oauth2.didFail(with: nil, for: presentation.authorization)
 		}
 		return controller
 	}
