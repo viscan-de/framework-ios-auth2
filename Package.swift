@@ -45,7 +45,8 @@ let package = Package(
 			.target(name: "macOS"), .target(name: "iOS"), .target(name: "tvOS")]),
 		.target(name: "DataLoader", dependencies: [.target(name: "Flows")]),
 		.testTarget(name: "BaseTests", dependencies: [.target(name: "Base"), .target(name: "Flows")]),
-		.testTarget(name: "FlowTests", dependencies: [.target(name: "Flows")]),
+		.testTarget(name: "FlowTests", dependencies: [
+			.target(name: "Flows"), .target(name: "macOS"), .target(name: "iOS")]),
 //		.testTarget(name: "DataLoaderTests", dependencies: [.target(name: "DataLoader")]),
 	]
 )

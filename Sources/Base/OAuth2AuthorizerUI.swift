@@ -46,3 +46,23 @@ public protocol OAuth2AuthorizerUI {
 	*/
 	func authorizeEmbedded(with config: OAuth2AuthConfig, at url: URL) throws
 }
+
+
+/**
+A web authentication session as authorizers use it, such as `ASWebAuthenticationSession`: started to present the sign-in screen, and
+cancelled to take that screen down.
+*/
+public protocol OAuth2WebAuthenticationSession: AnyObject {
+	
+	/**
+	Starts the session, presenting its sign-in screen.
+	
+	- returns: false if the session could not start; its completion handler is then never called
+	*/
+	func start() -> Bool
+	
+	/**
+	Cancels the session, dismissing its sign-in screen if it is up.
+	*/
+	func cancel()
+}

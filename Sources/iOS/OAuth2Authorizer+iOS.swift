@@ -43,7 +43,7 @@ open class OAuth2Authorizer: OAuth2AuthorizerUI {
 #endif
 	
 	/// Used to store the authentication session.
-	private var authenticationSession: AnyObject?
+	private var authenticationSession: OAuth2WebAuthenticationSession?
 	
 	/// Used to store the ASWebAuthenticationPresentationContextProvider
 	private var webAuthenticationPresentationContextProvider: AnyObject?
@@ -219,15 +219,32 @@ open class OAuth2Authorizer: OAuth2AuthorizerUI {
 			self.webAuthenticationPresentationContextProvider = nil
 		}
 		
-		authenticationSession = ASWebAuthenticationSession(url: url, callbackURLScheme: redirectURL.scheme, completionHandler: completionHandler)
+		let session = makeAuthenticationSession(at: url, callbackURLScheme: redirectURL.scheme, prefersEphemeralWebBrowserSession: prefersEphemeralWebBrowserSession, completionHandler: completionHandler)
+		authenticationSession = session
+		return session.start()
+	}
+	
+	/**
+	Creates the session `authenticationSessionEmbedded(at:withRedirect:prefersEphemeralWebBrowserSession:)` starts: an
+	`ASWebAuthenticationSession` presenting from `resolvePresentationAnchor()`. Override to supply another session, such as one that
+	presents nothing in tests.
+	
+	- parameter at:                The authorize URL to open
+	- parameter callbackURLScheme: The scheme of the redirect URL that ends the session
+	- parameter prefersEphemeralWebBrowserSession: Passed through to the session
+	- parameter completionHandler: Called once, with the redirect URL or with the error that ended the session
+	- returns:                     The session, not yet started
+	*/
+	open func makeAuthenticationSession(at url: URL, callbackURLScheme: String?, prefersEphemeralWebBrowserSession: Bool, completionHandler: @escaping (URL?, Error?) -> Void) -> OAuth2WebAuthenticationSession {
+		let session = ASWebAuthenticationSession(url: url, callbackURLScheme: callbackURLScheme, completionHandler: completionHandler)
 		if #available(iOS 13.0, macCatalyst 13.1, *) {
-			webAuthenticationPresentationContextProvider = OAuth2ASWebAuthenticationPresentationContextProvider(authorizer: self)
-			if let session = authenticationSession as? ASWebAuthenticationSession {
-				session.presentationContextProvider = webAuthenticationPresentationContextProvider as! OAuth2ASWebAuthenticationPresentationContextProvider
-				session.prefersEphemeralWebBrowserSession = prefersEphemeralWebBrowserSession
-			}
+			// The session holds its context provider weakly.
+			let provider = OAuth2ASWebAuthenticationPresentationContextProvider(authorizer: self)
+			webAuthenticationPresentationContextProvider = provider
+			session.presentationContextProvider = provider
+			session.prefersEphemeralWebBrowserSession = prefersEphemeralWebBrowserSession
 		}
-		return (authenticationSession as! ASWebAuthenticationSession).start()
+		return session
 	}
 	
 	
@@ -372,6 +389,9 @@ class OAuth2SFViewControllerDelegate: NSObject, SFSafariViewControllerDelegate, 
     }
 }
 #endif
+
+extension ASWebAuthenticationSession: OAuth2WebAuthenticationSession {
+}
 
 @available(iOS 13.0, *)
 class OAuth2ASWebAuthenticationPresentationContextProvider: NSObject, ASWebAuthenticationPresentationContextProviding {
