@@ -187,8 +187,17 @@ open class OAuth2Base: OAuth2Securable {
 		return currentAuthorization == authorization
 	}
 	
-	/// Whether a sign-in screen the authorizer presented for the authorization in progress is up: from the moment the authorizer
-	/// presents it until it closes by itself or the authorization ends, which takes it down.
+	/**
+	Whether a sign-in screen that an authorizer registered with `beginPresentation(dismiss:)` is up for the authorization in progress.
+	
+	`OAuth2Authorizer` registers its embedded screens. The `ASWebAuthenticationSession` sheet counts until it completes, so not during
+	the token exchange that follows. The Safari view controller, the web view controller and the macOS web view window or sheet stay up
+	during the token exchange and count until the user closes them or the authorization ends. Once the authorization has ended none
+	counts, even a screen the caller has yet to dismiss because `authorizeEmbeddedAutoDismiss` is off.
+	
+	Not covered: the system browser (`openAuthorizeURLInBrowser(_:)`), whose closing the library cannot see, and the password grant's
+	login controller, presented by `OAuth2CustomAuthorizerUI`.
+	*/
 	public final var isPresentingAuthorization: Bool {
 		authorizationLock.lock()
 		defer { authorizationLock.unlock() }
