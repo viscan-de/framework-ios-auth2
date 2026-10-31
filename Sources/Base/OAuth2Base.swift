@@ -483,13 +483,28 @@ open class OAuth2Base: OAuth2Securable {
 	/**
 	Allows to abort authorization currently in progress.
 	
-	Answers at once with `.requestCancelled`, cancels the authorization's running requests and takes down the sign-in screen presented
-	for it. The flows drop what those requests and that screen report later, so it cannot answer another authorization.
+	Answers its callback with `.requestCancelled` and takes down the sign-in screen presented for it; the flows drop whatever its
+	requests and that screen report later. Cancels the authorization's token requests, but never a refresh-token request: that one
+	finishes and stores the tokens it receives, since the provider may already have rotated the refresh token. Does nothing when no
+	authorization is in progress.
+	
+	Can be called on any thread: off the main thread it returns at once and answers on the main thread, so it never waits on it.
 	*/
 	open func abortAuthorization() {
+		guard let authorization = currentAuthorization else {
+			logger?.debug("OAuth2", msg: "No authorization in progress to abort")
+			return
+		}
 		logger?.debug("OAuth2", msg: "Aborting authorization")
-		_ = abortTask()
-		didFail(with: nil)
+		_ = abortTasks(of: authorization)
+		callAsyncOnMainThread {
+			self.didFail(with: nil, for: authorization)
+		}
+	}
+	
+	/// Requests started now belong to the authorization in progress, so that aborting it cancels them and no other.
+	override var authorizationOfNewRequests: OAuth2AuthorizationID? {
+		return currentAuthorization
 	}
 	
 	

@@ -386,7 +386,9 @@ open class OAuth2: OAuth2Base {
             let post = try tokenRequestForTokenRefresh(params: params).asURLRequest(for: self)
             logger?.debug("OAuth2", msg: "Using refresh token to receive access token from \(post.url?.description ?? "nil")")
             
-            perform(request: post) { response in
+            // Never cancelled by an abort: the provider may already have rotated the refresh token, and only
+            // this response carries the new one, which the code below stores.
+            perform(request: type(of: self).keepingRunningOnAbort(post)) { response in
                 do {
                     // The error status must be handled *before* the body is read. `responseData()`
                     // throws on 401 and 403 by itself, and `parseRefreshTokenResponseData` throws on the
