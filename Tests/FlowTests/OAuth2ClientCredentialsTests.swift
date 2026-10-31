@@ -149,5 +149,19 @@ class OAuth2ClientCredentialsTests: XCTestCase {
 			XCTAssertFalse(true, "`tokenRequest()` should not have thrown but threw \(err)")
 		}
 	}
+	
+	func testAnAbortedAuthorizationInstallsNoToken() {
+		let oauth = genericOAuth2()
+		let performer = OAuth2DeferredPerformer()
+		oauth.requestPerformer = performer
+		var answers = [OAuth2Error?]()
+		oauth.authorize() { _, error in answers.append(error) }
+		XCTAssertEqual(1, performer.requests.count)
+		
+		oauth.abortAuthorization()
+		performer.complete(0, with: ["access_token": "late", "token_type": "bearer"])
+		XCTAssertNil(oauth.accessToken, "Nobody waits on the token of an aborted authorization")
+		XCTAssertEqual([.requestCancelled], answers)
+	}
 }
 

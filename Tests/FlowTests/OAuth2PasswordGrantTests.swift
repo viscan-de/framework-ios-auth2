@@ -112,5 +112,19 @@ class OAuth2PasswordGrantTests: XCTestCase {
 		XCTAssertTrue(body!.contains("client_id=abc"), "Must add client_id to request body")
 		XCTAssertTrue(body!.contains("foo=bar+%26+hat"), "Must create correct request body")
 	}
+	
+	func testAnAbortedAuthorizationInstallsNoToken() {
+		let oauth = genericOAuth2Password()
+		let performer = OAuth2DeferredPerformer()
+		oauth.requestPerformer = performer
+		var answers = [OAuth2Error?]()
+		oauth.authorize() { _, error in answers.append(error) }
+		XCTAssertEqual(1, performer.requests.count)
+		
+		oauth.abortAuthorization()
+		performer.complete(0, with: ["access_token": "late", "token_type": "bearer"])
+		XCTAssertNil(oauth.accessToken, "Nobody waits on the token of an aborted authorization")
+		XCTAssertEqual([.requestCancelled], answers)
+	}
 }
 

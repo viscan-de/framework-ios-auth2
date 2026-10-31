@@ -193,4 +193,63 @@ class OAuth2DeviceGrantTests: XCTestCase {
 			XCTAssertTrue(false, "Should not throw wrong error")
 		}
 	}
+	
+	// MARK: - Polling and Aborts
+	
+	func deviceCodeResponse(interval: TimeInterval) -> OAuth2JSON {
+		return [
+			"device_code": "GmRhmhcxhwAzkoEqiMEg_DnyEysNkuNhszIySk9eS",
+			"user_code": "WDJB-MJHT",
+			"verification_uri": "https://auth.ful.io/device",
+			"expires_in": 1800,
+			"interval": interval,
+		]
+	}
+	
+	func testAnAbortedDeviceAuthorizationInstallsNoToken() {
+		let oauth = OAuth2DeviceGrant(settings: baseSettings)
+		let performer = OAuth2DeferredPerformer()
+		oauth.requestPerformer = performer
+		var answers = [OAuth2Error?]()
+		oauth.didAuthorizeOrFail = { _, error in answers.append(error) }
+		oauth.start() { _, _ in }
+		performer.complete(0, with: deviceCodeResponse(interval: 5))
+		XCTAssertEqual(2, performer.requests.count, "Polling for the token")
+		
+		oauth.abortAuthorization()
+		performer.complete(1, with: ["access_token": "late", "token_type": "bearer"])
+		XCTAssertNil(oauth.accessToken)
+		XCTAssertEqual([.requestCancelled], answers)
+	}
+	
+	func testAnAbortedDeviceAuthorizationStopsPolling() {
+		let oauth = OAuth2DeviceGrant(settings: baseSettings)
+		let performer = OAuth2DeferredPerformer()
+		oauth.requestPerformer = performer
+		oauth.didAuthorizeOrFail = { _, _ in }
+		oauth.start() { _, _ in }
+		performer.complete(0, with: deviceCodeResponse(interval: 0.05))
+		performer.complete(1, with: ["error": "authorization_pending"], status: 400)
+		
+		oauth.abortAuthorization()
+		RunLoop.current.run(until: Date().addingTimeInterval(0.3))
+		XCTAssertEqual(2, performer.requests.count, "No poll after the abort")
+	}
+	
+	func testADeviceFlowStartedOutsideAnAuthorizationAnswersAsBefore() {
+		let oauth = OAuth2DeviceGrant(settings: baseSettings)
+		let performer = OAuth2DeferredPerformer()
+		oauth.requestPerformer = performer
+		oauth.start() { _, _ in }
+		performer.complete(0, with: deviceCodeResponse(interval: 5))
+		
+		var answers = [OAuth2Error?]()
+		oauth.didAuthorizeOrFail = { params, error in
+			XCTAssertNotNil(params)
+			answers.append(error)
+		}
+		performer.complete(1, with: ["access_token": "device-token", "token_type": "bearer"])
+		XCTAssertEqual("device-token", oauth.accessToken)
+		XCTAssertEqual([nil], answers, "An unscoped device flow ends whatever authorization is in progress, as before")
+	}
 }

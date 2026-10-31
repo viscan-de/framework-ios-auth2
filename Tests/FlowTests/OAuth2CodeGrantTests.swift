@@ -39,6 +39,9 @@ import AuthenticationServices
 #endif
 #if os(iOS)
 import UIKit
+import SafariServices
+#elseif os(macOS)
+import AppKit
 #endif
 
 
@@ -532,6 +535,36 @@ class OAuth2MockPerformer: OAuth2RequestPerformer {
 }
 
 
+/**
+Holds every request's completion until the test answers it. Its tasks are never resumed, so nothing goes over the network.
+*/
+class OAuth2DeferredPerformer: OAuth2RequestPerformer {
+	
+	static let session = URLSession(configuration: .ephemeral)
+	
+	private(set) var requests = [URLRequest]()
+	
+	/// The task returned for each request; one `abortAuthorization()` cancelled is no longer `.suspended`.
+	private(set) var tasks = [URLSessionTask]()
+	
+	private var completions = [(Data?, URLResponse?, Error?) -> Void]()
+	
+	func perform(request: URLRequest, completionHandler: @escaping (Data?, URLResponse?, Error?) -> Void) -> URLSessionTask? {
+		let task = type(of: self).session.dataTask(with: request)
+		requests.append(request)
+		tasks.append(task)
+		completions.append(completionHandler)
+		return task
+	}
+	
+	/// Answers the request performed `index`th with `json` and `status`.
+	func complete(_ index: Int, with json: OAuth2JSON, status: Int = 200) {
+		let http = HTTPURLResponse(url: requests[index].url!, statusCode: status, httpVersion: nil, headerFields: nil)!
+		completions[index](try! JSONSerialization.data(withJSONObject: json, options: []), http, nil)
+	}
+}
+
+
 #if os(iOS) || os(macOS)
 
 /**
@@ -594,6 +627,7 @@ class OAuth2AuthenticationSessionTests: XCTestCase {
 		XCTAssertEqual([nil], answers)
 		XCTAssertEqual("2YotnFZFEjr1zCsicMWpAA", oauth.accessToken)
 		XCTAssertFalse(oauth.isAuthorizing)
+		XCTAssertEqual(0, authorizer.sessions[0].cancelCount, "A sheet that closed by itself is not cancelled")
 	}
 	
 	func testCancellingTheSessionAnswersCancelled() {
@@ -696,6 +730,221 @@ class OAuth2AuthenticationSessionTests: XCTestCase {
 		XCTAssertFalse(oauth.isPresentingAuthorization)
 	}
 	
+	func testAbortDuringARefreshLetsTheRefreshFinishAndStoreItsTokens() {
+		let (oauth, authorizer, performer) = codeGrant()
+		oauth.refreshToken = "spent-on-the-wire"
+		var answers = [OAuth2Error?]()
+		oauth.authorize() { _, error in answers.append(error) }
+		XCTAssertEqual(1, performer.requests.count, "The refresh is running")
+		
+		oauth.abortAuthorization()
+		XCTAssertEqual([.requestCancelled], answers)
+		XCTAssertEqual(.suspended, performer.tasks[0].state, "A refresh is never cancelled: the provider may have rotated the refresh token already")
+		
+		performer.complete(0, with: [
+			"access_token": "fresh-access",
+			"token_type": "bearer",
+			"expires_in": 3600,
+			"refresh_token": "rotated",
+		])
+		XCTAssertEqual("fresh-access", oauth.accessToken)
+		XCTAssertEqual("rotated", oauth.refreshToken, "The rotated refresh token is kept")
+		XCTAssertEqual([.requestCancelled], answers, "The refresh's answer is dropped")
+		XCTAssertEqual(0, authorizer.sessions.count)
+	}
+	
+	func testARefreshEndingAfterAnAbortPresentsNoSheet() {
+		let (oauth, authorizer, performer) = codeGrant()
+		oauth.refreshToken = "dead"
+		var answers = [OAuth2Error?]()
+		oauth.authorize() { _, error in answers.append(error) }
+		oauth.abortAuthorization()
+		
+		// a rejected refresh goes on to the sign-in sheet, for an authorization still in progress
+		performer.complete(0, with: ["error": "unauthorized_client"], status: 400)
+		XCTAssertEqual(0, authorizer.sessions.count, "Nobody waits on a sign-in any more")
+		XCTAssertEqual([.requestCancelled], answers)
+	}
+	
+	func testALateRedirectThroughHandleRedirectURLDoesNotAnswerTheNextSignIn() {
+		let (oauth, _, performer) = codeGrant()
+		oauth.authorize() { _, _ in }
+		let firstState = oauth.context.state
+		oauth.abortAuthorization()
+		
+		var secondAnswers = [OAuth2Error?]()
+		oauth.authorize() { _, error in secondAnswers.append(error) }
+		XCTAssertNotEqual(firstState, oauth.context.state, "Every sign-in has its own state")
+		
+		// the first sign-in's redirect, reaching the app by its URL scheme
+		oauth.handleRedirectURL(URL(string: "\(redirect)?code=MNOP&state=\(firstState)")!)
+		XCTAssertEqual(0, performer.requests.count, "A late redirect is not exchanged")
+		XCTAssertEqual([], secondAnswers, "and it does not answer the next sign-in")
+		XCTAssertTrue(oauth.isAuthorizing)
+		oauth.abortAuthorization()
+	}
+	
+	func testARedirectWithAStateNeverIssuedStillFails() {
+		let (oauth, _, performer) = codeGrant()
+		var answers = [OAuth2Error?]()
+		oauth.authorize() { _, error in answers.append(error) }
+		
+		oauth.handleRedirectURL(URL(string: "\(redirect)?code=MNOP&state=FORGED")!)
+		XCTAssertEqual(0, performer.requests.count)
+		XCTAssertEqual([.invalidState], answers)
+	}
+	
+	func testAuthorizingFromTheCallbackStartsANewSignIn() {
+		let (oauth, authorizer, _) = codeGrant()
+		var secondAnswers = [OAuth2Error?]()
+		oauth.authorize() { _, _ in
+			oauth.authorize() { _, error in secondAnswers.append(error) }
+		}
+		oauth.abortAuthorization()
+		
+		XCTAssertEqual([], secondAnswers, "The first sign-in has ended by the time its callback runs")
+		XCTAssertEqual(2, authorizer.sessions.count)
+		XCTAssertTrue(oauth.isPresentingAuthorization)
+		XCTAssertEqual(0, authorizer.sessions[1].cancelCount)
+		oauth.abortAuthorization()
+		XCTAssertEqual([.requestCancelled], secondAnswers)
+	}
+	
+	func testAbortingFromTheCallbackAnswersOnce() {
+		let (oauth, _, _) = codeGrant()
+		var answers = 0
+		oauth.authorize() { _, _ in
+			answers += 1
+			if 1 == answers {
+				oauth.abortAuthorization()
+			}
+		}
+		oauth.abortAuthorization()
+		XCTAssertEqual(1, answers)
+	}
+	
+	func testAbortWithNothingInProgressCallsNoCallbacks() {
+		let (oauth, _, _) = codeGrant()
+		var afterCalls = 0
+		oauth.afterAuthorizeOrFail = { _, _ in afterCalls += 1 }
+		
+		oauth.abortAuthorization()
+		XCTAssertEqual(0, afterCalls)
+	}
+	
+	func testAbortFromABackgroundThreadDoesNotWaitOnTheMainThread() {
+		let (oauth, authorizer, _) = codeGrant()
+		let answered = expectation(description: "answered")
+		oauth.authorize() { _, error in
+			XCTAssertTrue(Thread.isMainThread)
+			XCTAssertEqual(.requestCancelled, error)
+			answered.fulfill()
+		}
+		
+		let returned = DispatchSemaphore(value: 0)
+		DispatchQueue.global().async {
+			oauth.abortAuthorization()
+			returned.signal()
+		}
+		// the main thread blocked, as it is while it waits on the work that aborts
+		XCTAssertEqual(.success, returned.wait(timeout: .now() + 2), "abortAuthorization() must not wait on the main thread")
+		
+		wait(for: [answered], timeout: 2)
+		XCTAssertEqual(1, authorizer.sessions[0].cancelCount)
+		XCTAssertFalse(authorizer.sessions[0].wasCancelledOffTheMainThread)
+	}
+	
+	func testACancelThatCallsTheCompletionAnswersOnce() {
+		let (oauth, authorizer, _) = codeGrant()
+		authorizer.sessionsCallBackOnCancel = true
+		var answers = [OAuth2Error?]()
+		oauth.authorize() { _, error in answers.append(error) }
+		
+		oauth.abortAuthorization()
+		XCTAssertEqual([.requestCancelled], answers)
+		XCTAssertEqual(1, authorizer.sessions[0].cancelCount)
+		XCTAssertFalse(oauth.isAuthorizing)
+	}
+	
+	func testATokenResponseOffTheMainThreadAnswersOnTheMainThread() {
+		let (oauth, authorizer, performer) = codeGrant()
+		let answered = expectation(description: "answered")
+		oauth.authorize() { params, error in
+			XCTAssertTrue(Thread.isMainThread)
+			XCTAssertNotNil(params)
+			XCTAssertNil(error)
+			answered.fulfill()
+		}
+		authorizer.sessions[0].completionHandler(redirectURL(oauth), nil)
+		
+		let tokenResponse = self.tokenResponse
+		DispatchQueue.global().async {
+			performer.complete(0, with: tokenResponse)
+		}
+		wait(for: [answered], timeout: 2)
+		XCTAssertEqual("2YotnFZFEjr1zCsicMWpAA", oauth.accessToken)
+	}
+	
+	func testAnUnparseableRedirectURLFailsTheAuthorization() {
+		let (oauth, authorizer, _) = codeGrant()
+		oauth.redirect = ""
+		var answers = [OAuth2Error?]()
+		oauth.authorize() { _, error in answers.append(error) }
+		
+		#if os(iOS)
+		XCTAssertEqual([.unableToOpenAuthorizeURL], answers)
+		#else
+		XCTAssertEqual([.invalidRedirectURL("")], answers)
+		#endif
+		XCTAssertEqual(0, authorizer.sessions.count)
+		XCTAssertFalse(oauth.isAuthorizing)
+	}
+	
+	#if os(iOS)
+	func testSafariDoneOrSwipeAfterTheEndAnswersNobody() {
+		let (oauth, authorizer, _) = codeGrant()
+		let presenter = UIViewController()
+		var firstAnswers = 0
+		oauth.didAuthorizeOrFail = { _, _ in firstAnswers += 1 }
+		let web = try! authorizer.authorizeSafariEmbedded(from: presenter, at: URL(string: "https://auth.ful.io")!)
+		let delegate = web.delegate
+		XCTAssertNotNil(delegate)
+		oauth.abortAuthorization()
+		XCTAssertEqual(1, firstAnswers)
+		
+		var secondAnswers = [OAuth2Error?]()
+		oauth.authorize() { _, error in secondAnswers.append(error) }
+		delegate?.safariViewControllerDidFinish?(web)
+		let swipe = UIPresentationController(presentedViewController: web, presenting: presenter)
+		(delegate as? UIAdaptivePresentationControllerDelegate)?.presentationControllerDidDismiss?(swipe)
+		
+		XCTAssertEqual(1, firstAnswers)
+		XCTAssertEqual([], secondAnswers, "Done or a swipe on the first sign-in's Safari view answers nobody")
+		XCTAssertTrue(oauth.isAuthorizing)
+		oauth.abortAuthorization()
+	}
+	#endif
+	
+	#if os(macOS)
+	func testTheWebViewWindowOfAnEndedAuthorizationCanBeClosed() {
+		let (oauth, authorizer, _) = codeGrant()
+		oauth.didAuthorizeOrFail = { _, _ in }
+		let controller = try! authorizer.presentableAuthorizeViewController(at: URL(string: "https://auth.ful.io")!)
+		let windowController = authorizer.windowController(forViewController: controller, with: oauth.authConfig)
+		let window = windowController.window!
+		window.isReleasedWhenClosed = false
+		oauth.abortAuthorization()
+		
+		var closed = false
+		let observer = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: nil) { _ in
+			closed = true
+		}
+		defer { NotificationCenter.default.removeObserver(observer) }
+		controller.onWillCancel?()
+		XCTAssertTrue(closed, "Its close button refuses to close it otherwise, and nobody answers for it any more")
+	}
+	#endif
+	
 	func testASessionThatCannotStartFailsTheAuthorization() {
 		let (oauth, authorizer, _) = codeGrant()
 		authorizer.sessionsStart = false
@@ -718,10 +967,16 @@ class OAuth2FakeAuthenticationSession: OAuth2WebAuthenticationSession {
 	
 	let startResult: Bool
 	
+	/// Whether `cancel()` calls the completion handler with `.canceledLogin`, as a real session may.
+	let cancelCallsCompletion: Bool
+	
 	private(set) var cancelCount = 0
 	
-	init(startResult: Bool, completionHandler: @escaping (URL?, Error?) -> Void) {
+	private(set) var wasCancelledOffTheMainThread = false
+	
+	init(startResult: Bool, cancelCallsCompletion: Bool, completionHandler: @escaping (URL?, Error?) -> Void) {
 		self.startResult = startResult
+		self.cancelCallsCompletion = cancelCallsCompletion
 		self.completionHandler = completionHandler
 	}
 	
@@ -731,6 +986,12 @@ class OAuth2FakeAuthenticationSession: OAuth2WebAuthenticationSession {
 	
 	func cancel() {
 		cancelCount += 1
+		if !Thread.isMainThread {
+			wasCancelledOffTheMainThread = true
+		}
+		if cancelCallsCompletion {
+			completionHandler(nil, ASWebAuthenticationSessionError(.canceledLogin))
+		}
 	}
 }
 
@@ -743,38 +1004,17 @@ class OAuth2FakeSessionAuthorizer: OAuth2Authorizer {
 	/// What the sessions' `start()` returns.
 	var sessionsStart = true
 	
+	/// Whether the sessions' `cancel()` calls their completion handler.
+	var sessionsCallBackOnCancel = false
+	
 	private(set) var sessions = [OAuth2FakeAuthenticationSession]()
 	
 	override func makeAuthenticationSession(at url: URL, callbackURLScheme: String?, prefersEphemeralWebBrowserSession: Bool, completionHandler: @escaping (URL?, Error?) -> Void) -> OAuth2WebAuthenticationSession {
-		let session = OAuth2FakeAuthenticationSession(startResult: sessionsStart, completionHandler: completionHandler)
+		let session = OAuth2FakeAuthenticationSession(startResult: sessionsStart, cancelCallsCompletion: sessionsCallBackOnCancel, completionHandler: completionHandler)
 		sessions.append(session)
 		return session
 	}
 }
 
-
-/**
-Holds every request's completion until the test answers it. Its tasks are never resumed, so nothing goes over the network.
-*/
-class OAuth2DeferredPerformer: OAuth2RequestPerformer {
-	
-	static let session = URLSession(configuration: .ephemeral)
-	
-	private(set) var requests = [URLRequest]()
-	
-	private var completions = [(Data?, URLResponse?, Error?) -> Void]()
-	
-	func perform(request: URLRequest, completionHandler: @escaping (Data?, URLResponse?, Error?) -> Void) -> URLSessionTask? {
-		requests.append(request)
-		completions.append(completionHandler)
-		return type(of: self).session.dataTask(with: request)
-	}
-	
-	/// Answers the request performed `index`th with `json` and a 200.
-	func complete(_ index: Int, with json: OAuth2JSON) {
-		let http = HTTPURLResponse(url: requests[index].url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
-		completions[index](try! JSONSerialization.data(withJSONObject: json, options: []), http, nil)
-	}
-}
 
 #endif
