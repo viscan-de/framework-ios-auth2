@@ -270,7 +270,8 @@ open class OAuth2Base: OAuth2Securable {
 	public final var afterAuthorizeOrFail: ((_ authParameters: OAuth2JSON?, _ error: OAuth2Error?) -> Void)?
 	
 	/**
-	For internal use, don't mess with it, it's public only for subclassing and compilation reasons. Executed right before
+	For internal use, don't mess with it, it's public only for subclassing and compilation reasons. Executed once the authorization has
+	ended, before the authorization callback and
 	`afterAuthorizeOrFail`.
 	*/
 	public final var internalAfterAuthorizeOrFail: ((_ wasFailure: Bool, _ error: OAuth2Error?) -> Void)?
@@ -455,28 +456,36 @@ open class OAuth2Base: OAuth2Securable {
 			logger?.debug("OAuth2", msg: "Ignoring the answer of an authorization that has ended")
 			return
 		}
-		var finalError = error
+		let finalError: OAuth2Error?
 		if nil != parameters {
+			finalError = nil
 			if useKeychain {
 				storeTokensToKeychain()
 			}
 		}
-		else if let error = finalError {
+		else if let error = error {
+			finalError = error
 			logger?.debug("OAuth2", msg: "\(error)")
 		}
 		else {
 			finalError = OAuth2Error.requestCancelled
 		}
-		callOnMainThread() {
+		// Asynchronous off the main thread: a synchronous hop from a URL session's queue, or from a thread the main thread waits on,
+		// deadlocks.
+		callAsyncOnMainThread() {
 			guard self.isInScope(scope) else {
 				self.logger?.debug("OAuth2", msg: "Ignoring the answer of an authorization that has ended")
 				return
 			}
-			self.retireCurrentAuthorization()
-			self.didAuthorizeOrFail?(parameters, finalError)
+			// The authorization has fully ended before anyone hears of it: the callback may start the next one, or abort.
+			let callback = self.didAuthorizeOrFail
+			let internalAfter = self.internalAfterAuthorizeOrFail
+			let after = self.afterAuthorizeOrFail
 			self.didAuthorizeOrFail = nil
-			self.internalAfterAuthorizeOrFail?(nil == parameters, finalError)
-			self.afterAuthorizeOrFail?(parameters, finalError)
+			self.retireCurrentAuthorization()
+			internalAfter?(nil == parameters, finalError)
+			callback?(parameters, finalError)
+			after?(parameters, finalError)
 		}
 	}
 	
