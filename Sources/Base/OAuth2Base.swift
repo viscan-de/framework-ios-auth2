@@ -154,8 +154,12 @@ open class OAuth2Base: OAuth2Securable {
 	/// starts one from a URL session's queue), its requests answer on theirs, and its sign-in screens live on the main thread.
 	private let authorizationLock = NSLock()
 	
-	/// Backs `currentAuthorization`. Only touch while holding `authorizationLock`.
-	private var _currentAuthorization: OAuth2AuthorizationID?
+	/// Backs `currentAuthorization`. Only touch while holding `authorizationLock`; internal so tests can set it.
+	var _currentAuthorization: OAuth2AuthorizationID?
+	
+	/// Test seam: runs on the main thread while an authorization ends, after `didAuthorizeOrFail` has been cleared and before the
+	/// authorization is retired, where another thread can already start the next one.
+	var onAuthorizationCallbackCleared: (() -> Void)?
 	
 	/// The sign-in screen registered with `beginPresentation(dismiss:)`, with the closure that takes it down. Only touch while holding
 	/// `authorizationLock`.
@@ -507,6 +511,7 @@ open class OAuth2Base: OAuth2Securable {
 			let internalAfter = self.internalAfterAuthorizeOrFail
 			let after = self.afterAuthorizeOrFail
 			self.didAuthorizeOrFail = nil
+			self.onAuthorizationCallbackCleared?()
 			self.retireCurrentAuthorization()
 			internalAfter?(nil == parameters, finalError)
 			callback?(parameters, finalError)
