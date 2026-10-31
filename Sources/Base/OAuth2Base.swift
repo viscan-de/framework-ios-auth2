@@ -135,13 +135,20 @@ open class OAuth2Base: OAuth2Securable {
 	
 	/// This closure is internally used with `authorize(params:callback:)` and only exposed for subclassing reason, do not mess with it!
 	///
-	/// Setting it starts an authorization with an identity of its own, `currentAuthorization`; clearing it ends that.
+	/// Setting it starts an authorization: the callback is set and an identity of its own (`currentAuthorization`) issued in one step
+	/// under a lock. Clearing it ends that the same way. `authorize(params:callback:)` uses `beginAuthorization(callback:)`, which
+	/// refuses while an authorization is in progress.
 	public final var didAuthorizeOrFail: ((_ parameters: OAuth2JSON?, _ error: OAuth2Error?) -> Void)? {
-		didSet {
-			let starts = (nil != didAuthorizeOrFail)
+		get {
 			authorizationLock.lock()
-			_currentAuthorization = starts ? OAuth2AuthorizationID(serial: nextSerial()) : nil
-			authorizationLock.unlock()
+			defer { authorizationLock.unlock() }
+			return _didAuthorizeOrFail
+		}
+		set {
+			authorizationLock.lock()
+			defer { authorizationLock.unlock() }
+			_didAuthorizeOrFail = newValue
+			_currentAuthorization = (nil == newValue) ? nil : OAuth2AuthorizationID(serial: nextSerial())
 		}
 	}
 	
@@ -150,15 +157,38 @@ open class OAuth2Base: OAuth2Securable {
 		return nil != didAuthorizeOrFail
 	}
 	
-	/// Guards `_currentAuthorization`, `_presentation` and `lastSerial`. An authorization can start on any thread (`OAuth2DataLoader`
-	/// starts one from a URL session's queue), its requests answer on theirs, and its sign-in screens live on the main thread.
+	/**
+	For flows: starts an authorization, setting its callback and issuing its identity in one step under a lock, so no other thread can
+	see one without the other.
+	
+	- parameter callback: The authorization's callback, which becomes `didAuthorizeOrFail`
+	- returns:            The new authorization's identity; nil if one is in progress already, in which case nothing was set
+	*/
+	public final func beginAuthorization(callback: @escaping (_ parameters: OAuth2JSON?, _ error: OAuth2Error?) -> Void) -> OAuth2AuthorizationID? {
+		authorizationLock.lock()
+		defer { authorizationLock.unlock() }
+		guard nil == _didAuthorizeOrFail else {
+			return nil
+		}
+		let authorization = OAuth2AuthorizationID(serial: nextSerial())
+		_didAuthorizeOrFail = callback
+		_currentAuthorization = authorization
+		return authorization
+	}
+	
+	/// Guards `_didAuthorizeOrFail`, `_currentAuthorization`, `_presentation` and `lastSerial`, so an authorization's callback and its
+	/// identity are only ever set and cleared together. An authorization can start on any thread (`OAuth2DataLoader` starts one from a
+	/// URL session's queue), its requests answer on theirs, and its sign-in screens live on the main thread.
 	private let authorizationLock = NSLock()
 	
-	/// Backs `currentAuthorization`. Only touch while holding `authorizationLock`; internal so tests can set it.
-	var _currentAuthorization: OAuth2AuthorizationID?
+	/// Backs `didAuthorizeOrFail`. Non-nil exactly while `_currentAuthorization` is. Only touch while holding `authorizationLock`.
+	private var _didAuthorizeOrFail: ((_ parameters: OAuth2JSON?, _ error: OAuth2Error?) -> Void)?
 	
-	/// Test seam: runs on the main thread while an authorization ends, after `didAuthorizeOrFail` has been cleared and before the
-	/// authorization is retired, where another thread can already start the next one.
+	/// Backs `currentAuthorization`. Only touch while holding `authorizationLock`.
+	private var _currentAuthorization: OAuth2AuthorizationID?
+	
+	/// Test seam: runs on the main thread while an authorization ends, once its callback, identity and screen have been taken and
+	/// before anyone is answered, where another thread can already start the next one.
 	var onAuthorizationCallbackCleared: (() -> Void)?
 	
 	/// The sign-in screen registered with `beginPresentation(dismiss:)`, with the closure that takes it down. Only touch while holding
@@ -260,41 +290,41 @@ open class OAuth2Base: OAuth2Securable {
 		}
 	}
 	
+	/// What `takeEndingAuthorization(_:)` took from an authorization that ends.
+	private struct EndingAuthorization {
+		
+		/// Its callback; nil if none was set (an answer while no authorization was in progress).
+		let callback: ((_ parameters: OAuth2JSON?, _ error: OAuth2Error?) -> Void)?
+		
+		/// The screen presented for it, to take down.
+		let presentation: (id: OAuth2PresentationID, dismiss: () -> Void)?
+	}
+	
 	/**
-	Retires the authorization that is ending: it loses its identity, so its work's late answers are dropped; its state is retired, so the
-	next authorization sends another and a late redirect carrying this one is recognized (`isLateRedirect(_:)`); and the screen
-	presented for it is taken down. Main thread.
+	Ends the authorization in scope in one step under the lock: takes its callback and clears it, retires its identity, so its work's
+	late answers are dropped, and takes the screen presented for it. Main thread.
 	
-	Only what is `ending`'s: the next authorization may already have started on another thread (`OAuth2DataLoader` starts one from a URL
-	session's queue), and its identity and screen stay. The state retired is still the ending authorization's: the next one issues its
-	own on the main thread when it presents its screen, after this.
+	The next authorization can start on another thread as soon as this returns (`OAuth2DataLoader` starts one from a URL session's
+	queue), and nothing done afterwards for this one touches its callback, identity or screen.
 	
-	- parameter ending: What `currentAuthorization` was when the authorization's end began
+	- returns: What was taken; nil if the authorization in scope has ended already
 	*/
-	private func retireAuthorization(_ ending: OAuth2AuthorizationID?) {
+	private func takeEndingAuthorization(_ scope: AuthorizationScope) -> EndingAuthorization? {
 		authorizationLock.lock()
-		if _currentAuthorization == ending {
-			_currentAuthorization = nil
+		defer { authorizationLock.unlock() }
+		let ending = _currentAuthorization
+		if case .only(let authorization) = scope, authorization != ending {
+			return nil
 		}
+		let callback = _didAuthorizeOrFail
+		_didAuthorizeOrFail = nil
+		_currentAuthorization = nil
 		var presentation: (id: OAuth2PresentationID, dismiss: () -> Void)?
 		if let registered = _presentation, registered.id.authorization == ending {
 			presentation = registered
 			_presentation = nil
 		}
-		authorizationLock.unlock()
-		context.retireState()
-		presentation?.dismiss()
-	}
-	
-	/**
-	Takes down whatever screen is registered, whichever authorization it was presented for. Main thread.
-	*/
-	private func dismissAnyPresentation() {
-		authorizationLock.lock()
-		let presentation = _presentation
-		_presentation = nil
-		authorizationLock.unlock()
-		presentation?.dismiss()
+		return EndingAuthorization(callback: callback, presentation: presentation)
 	}
 	
 	/**
@@ -524,20 +554,20 @@ open class OAuth2Base: OAuth2Securable {
 		// Asynchronous off the main thread: a synchronous hop from a URL session's queue, or from a thread the main thread waits on,
 		// deadlocks.
 		callAsyncOnMainThread() {
-			guard self.isInScope(scope) else {
+			// The authorization has fully ended before anyone hears of it: the callback may start the next one, or abort.
+			guard let ending = self.takeEndingAuthorization(scope) else {
 				self.logger?.debug("OAuth2", msg: "Ignoring the answer of an authorization that has ended")
 				return
 			}
-			// The authorization has fully ended before anyone hears of it: the callback may start the next one, or abort.
-			let ending = self.currentAuthorization
-			let callback = self.didAuthorizeOrFail
 			let internalAfter = self.internalAfterAuthorizeOrFail
 			let after = self.afterAuthorizeOrFail
-			self.didAuthorizeOrFail = nil
 			self.onAuthorizationCallbackCleared?()
-			self.retireAuthorization(ending)
+			// The state is still the ending authorization's: the next one issues its own on the main thread, when it presents its
+			// screen, after this. Retired, a late redirect carrying it is recognized (`isLateRedirect(_:)`).
+			self.context.retireState()
+			ending.presentation?.dismiss()
 			internalAfter?(nil == parameters, finalError)
-			callback?(parameters, finalError)
+			ending.callback?(parameters, finalError)
 			after?(parameters, finalError)
 		}
 	}
@@ -550,26 +580,12 @@ open class OAuth2Base: OAuth2Securable {
 	finishes and stores the tokens it receives, since the provider may already have rotated the refresh token. Does nothing when no
 	authorization is in progress.
 	
-	An authorization in progress without an identity, which nothing else could ever answer, is ended all the same, and whatever screen
-	is up is taken down.
-	
 	Can be called on any thread: off the main thread it returns at once and answers on the main thread, so it never waits on it.
 	*/
 	open func abortAuthorization() {
+		// An authorization in progress always has an identity: both are set and cleared together under the lock.
 		guard let authorization = currentAuthorization else {
-			guard isAuthorizing else {
-				logger?.debug("OAuth2", msg: "No authorization in progress to abort")
-				return
-			}
-			callAsyncOnMainThread {
-				// Checked again here: `didAuthorizeOrFail` is set an instant before its identity is issued.
-				guard self.isAuthorizing, nil == self.currentAuthorization else {
-					return
-				}
-				self.logger?.warn("OAuth2", msg: "Aborting an authorization that has no identity")
-				self.dismissAnyPresentation()
-				self.didFail(with: nil)
-			}
+			logger?.debug("OAuth2", msg: "No authorization in progress to abort")
 			return
 		}
 		logger?.debug("OAuth2", msg: "Aborting authorization")

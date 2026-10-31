@@ -1031,18 +1031,6 @@ class OAuth2AuthenticationSessionTests: XCTestCase {
 		}
 	}
 	
-	func testAbortEndsASignInThatLostItsIdentity() {
-		let (oauth, authorizer, _) = codeGrant()
-		var answers = [OAuth2Error?]()
-		oauth.authorize() { _, error in answers.append(error) }
-		oauth._currentAuthorization = nil
-		
-		oauth.abortAuthorization()
-		XCTAssertEqual([.requestCancelled], answers, "Nothing else could ever answer it")
-		XCTAssertFalse(oauth.isAuthorizing)
-		XCTAssertEqual(1, authorizer.sessions[0].cancelCount)
-	}
-	
 	func testADuplicateRedirectOfACompletedSignInDoesNotFailTheNextOne() {
 		let (oauth, authorizer, performer) = codeGrant()
 		oauth.authorize() { _, _ in }

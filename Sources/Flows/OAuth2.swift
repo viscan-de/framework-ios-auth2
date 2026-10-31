@@ -101,15 +101,14 @@ open class OAuth2: OAuth2Base {
      is canceled (error will be non-nil, e.g. `.requestCancelled` if auth was aborted)
      */
     public final func authorize(params: OAuth2StringDict? = nil, callback: @escaping ((OAuth2JSON?, OAuth2Error?) -> Void)) {
-        if isAuthorizing {
+        // Checking for one in progress, setting the callback and issuing the identity are one step, so a sign-in started on a
+        // URL session's queue cannot interleave with another starting or ending.
+        guard let authorization = beginAuthorization(callback: callback) else {
             callback(nil, OAuth2Error.alreadyAuthorizing)
             return
         }
-        
-        didAuthorizeOrFail = callback
         // Every step below answers for this authorization only: once it has ended (`abortAuthorization()` answers at
         // once), a refresh or registration still coming back must neither answer a newer one nor present a sign-in screen.
-        let authorization = currentAuthorization
         logger?.debug("OAuth2", msg: "Starting authorization")
         tryToObtainAccessTokenIfNeeded(params: params) { successParams, error in
             if let successParams = successParams {
