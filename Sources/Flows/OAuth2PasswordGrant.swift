@@ -106,7 +106,7 @@ open class OAuth2PasswordGrant: OAuth2 {
 		else {
 			// The token request answers only this authorization, not one started after it ended.
 			let authorization = currentAuthorization
-			obtainAccessToken(params: params) { params, error in
+			requestAccessToken(params: params, while: { self.isCurrentAuthorization(authorization) }) { params, error in
 				if let error = error {
 					self.didFail(with: error, for: authorization)
 				}
@@ -160,7 +160,7 @@ open class OAuth2PasswordGrant: OAuth2 {
 		
 		// perform the request; it answers only the authorization the credentials were entered for
 		let authorization = currentAuthorization
-		obtainAccessToken(params: customAuthParams) { params, error in
+		requestAccessToken(params: customAuthParams, while: { self.isCurrentAuthorization(authorization) }) { params, error in
 			
 			// reset credentials on error
 			if let error = error {
@@ -229,33 +229,59 @@ open class OAuth2PasswordGrant: OAuth2 {
 	- parameter callback: The callback to call after the request has returned
 	*/
 	public func obtainAccessToken(params: OAuth2StringDict? = nil, callback: @escaping ((_ params: OAuth2JSON?, _ error: OAuth2Error?) -> Void)) {
+		requestAccessToken(params: params, while: nil, callback: callback)
+	}
+	
+	/**
+	`obtainAccessToken(params:callback:)`, optionally for an authorization.
+	
+	- parameter while:    Nil, or checked on the main thread right before the response is parsed, which installs the token; the callback
+	                      then runs in the same turn of the main thread. Once it says no, the response is dropped and `callback` is not
+	                      called.
+	- parameter callback: The callback to call after the request has returned
+	*/
+	private func requestAccessToken(params: OAuth2StringDict?, while isWanted: (() -> Bool)?, callback: @escaping ((_ params: OAuth2JSON?, _ error: OAuth2Error?) -> Void)) {
 		do {
 			let post = try accessTokenRequest(params: params).asURLRequest(for: self)
 			logger?.debug("OAuth2", msg: "Requesting new access token from \(post.url?.description ?? "nil")")
 			
 			perform(request: post) { response in
-				do {
-					let data = try response.responseData()
-					let dict = try self.parseAccessTokenResponse(data: data)
-					if response.response.statusCode >= 400 {
-						throw OAuth2Error.generic("Failed with status \(response.response.statusCode)")
+				guard let isWanted = isWanted else {
+					self.handleAccessTokenResponse(response, callback: callback)
+					return
+				}
+				callAsyncOnMainThread {
+					guard isWanted() else {
+						self.logger?.debug("OAuth2", msg: "Dropping the token response of an authorization that has ended")
+						return
 					}
-					self.logger?.debug("OAuth2", msg: "Did get access token [\(nil != self.clientConfig.accessToken)]")
-					callback(dict, nil)
-				}
-				catch OAuth2Error.unauthorizedClient {     // TODO: which one is it?
-					callback(nil, OAuth2Error.wrongUsernamePassword)
-				}
-				catch OAuth2Error.forbidden {              // TODO: which one is it?
-					callback(nil, OAuth2Error.wrongUsernamePassword)
-				}
-				catch let error {
-					self.logger?.debug("OAuth2", msg: "Error obtaining access token: \(error)")
-					callback(nil, error.asOAuth2Error)
+					self.handleAccessTokenResponse(response, callback: callback)
 				}
 			}
 		}
 		catch {
+			callback(nil, error.asOAuth2Error)
+		}
+	}
+	
+	private func handleAccessTokenResponse(_ response: OAuth2Response, callback: ((_ params: OAuth2JSON?, _ error: OAuth2Error?) -> Void)) {
+		do {
+			let data = try response.responseData()
+			let dict = try parseAccessTokenResponse(data: data)
+			if response.response.statusCode >= 400 {
+				throw OAuth2Error.generic("Failed with status \(response.response.statusCode)")
+			}
+			logger?.debug("OAuth2", msg: "Did get access token [\(nil != clientConfig.accessToken)]")
+			callback(dict, nil)
+		}
+		catch OAuth2Error.unauthorizedClient {     // TODO: which one is it?
+			callback(nil, OAuth2Error.wrongUsernamePassword)
+		}
+		catch OAuth2Error.forbidden {              // TODO: which one is it?
+			callback(nil, OAuth2Error.wrongUsernamePassword)
+		}
+		catch let error {
+			logger?.debug("OAuth2", msg: "Error obtaining access token: \(error)")
 			callback(nil, error.asOAuth2Error)
 		}
 	}

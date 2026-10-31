@@ -115,23 +115,25 @@ open class OAuth2CodeGrant: OAuth2 {
 			logger?.debug("OAuth2", msg: "Exchanging code \(code) for access token at \(post.url!)")
 			
 			perform(request: post) { response in
-				// Checked before parsing: parsing installs the tokens, and nobody waits on the tokens of an
-				// authorization that has ended.
-				guard self.isCurrentAuthorization(authorization) else {
-					self.logger?.debug("OAuth2", msg: "Dropping the token response of an authorization that has ended")
-					return
-				}
-				do {
-					let data = try response.responseData()
-					let params = try self.parseAccessTokenResponse(data: data)
-					if response.response.statusCode >= 400 {
-						throw OAuth2Error.generic("Failed with status \(response.response.statusCode)")
+				// Checked, parsed and answered in one turn of the main thread, where authorizations end: parsing installs
+				// the tokens, and nobody waits on the tokens of an authorization that has ended.
+				callAsyncOnMainThread {
+					guard self.isCurrentAuthorization(authorization) else {
+						self.logger?.debug("OAuth2", msg: "Dropping the token response of an authorization that has ended")
+						return
 					}
-					self.logger?.debug("OAuth2", msg: "Did exchange code for access [\(nil != self.clientConfig.accessToken)] and refresh [\(nil != self.clientConfig.refreshToken)] tokens")
-					self.didAuthorize(withParameters: params, for: authorization)
-				}
-				catch let error {
-					self.didFail(with: error.asOAuth2Error, for: authorization)
+					do {
+						let data = try response.responseData()
+						let params = try self.parseAccessTokenResponse(data: data)
+						if response.response.statusCode >= 400 {
+							throw OAuth2Error.generic("Failed with status \(response.response.statusCode)")
+						}
+						self.logger?.debug("OAuth2", msg: "Did exchange code for access [\(nil != self.clientConfig.accessToken)] and refresh [\(nil != self.clientConfig.refreshToken)] tokens")
+						self.didAuthorize(withParameters: params, for: authorization)
+					}
+					catch let error {
+						self.didFail(with: error.asOAuth2Error, for: authorization)
+					}
 				}
 			}
 		}

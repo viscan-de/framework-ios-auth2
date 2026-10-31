@@ -36,7 +36,7 @@ open class OAuth2ClientCredentials: OAuth2 {
 	override open func doAuthorize(params inParams: OAuth2StringDict? = nil) {
 		// The token request answers only this authorization, not one started after it ended.
 		let authorization = currentAuthorization
-		self.obtainAccessToken(params: inParams) { params, error in
+		requestAccessToken(params: inParams, while: { self.isCurrentAuthorization(authorization) }) { params, error in
 			if let error = error {
 				self.didFail(with: error.asOAuth2Error, for: authorization)
 			}
@@ -75,21 +75,47 @@ open class OAuth2ClientCredentials: OAuth2 {
 	- parameter callback: The callback to call after the process has finished
 	*/
 	public func obtainAccessToken(params: OAuth2StringDict? = nil, callback: @escaping ((_ params: OAuth2JSON?, _ error: OAuth2Error?) -> Void)) {
+		requestAccessToken(params: params, while: nil, callback: callback)
+	}
+	
+	/**
+	`obtainAccessToken(params:callback:)`, optionally for an authorization.
+	
+	- parameter while:    Nil, or checked on the main thread right before the response is parsed, which installs the token; the callback
+	                      then runs in the same turn of the main thread. Once it says no, the response is dropped and `callback` is not
+	                      called.
+	- parameter callback: The callback to call after the process has finished
+	*/
+	private func requestAccessToken(params: OAuth2StringDict?, while isWanted: (() -> Bool)?, callback: @escaping ((_ params: OAuth2JSON?, _ error: OAuth2Error?) -> Void)) {
 		do {
 			let post = try accessTokenRequest(params: params).asURLRequest(for: self)
 			logger?.debug("OAuth2", msg: "Requesting new access token from \(post.url?.description ?? "nil")")
 			
 			perform(request: post) { response in
-				do {
-					let data = try response.responseData()
-					let params = try self.parseAccessTokenResponse(data: data)
-					self.logger?.debug("OAuth2", msg: "Did get access token [\(nil != self.clientConfig.accessToken)]")
-					callback(params, nil)
+				guard let isWanted = isWanted else {
+					self.handleAccessTokenResponse(response, callback: callback)
+					return
 				}
-				catch let error {
-					callback(nil, error.asOAuth2Error)
+				callAsyncOnMainThread {
+					guard isWanted() else {
+						self.logger?.debug("OAuth2", msg: "Dropping the token response of an authorization that has ended")
+						return
+					}
+					self.handleAccessTokenResponse(response, callback: callback)
 				}
 			}
+		}
+		catch let error {
+			callback(nil, error.asOAuth2Error)
+		}
+	}
+	
+	private func handleAccessTokenResponse(_ response: OAuth2Response, callback: ((_ params: OAuth2JSON?, _ error: OAuth2Error?) -> Void)) {
+		do {
+			let data = try response.responseData()
+			let params = try parseAccessTokenResponse(data: data)
+			logger?.debug("OAuth2", msg: "Did get access token [\(nil != clientConfig.accessToken)]")
+			callback(params, nil)
 		}
 		catch let error {
 			callback(nil, error.asOAuth2Error)
