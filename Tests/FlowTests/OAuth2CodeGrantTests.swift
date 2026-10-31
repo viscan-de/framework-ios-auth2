@@ -945,6 +945,73 @@ class OAuth2AuthenticationSessionTests: XCTestCase {
 	}
 	#endif
 	
+	func testASignInStartedOffTheMainThreadWhileAnotherEndsKeepsItsIdentity() {
+		let (oauth, authorizer, performer) = codeGrant()
+		var firstAnswers = [OAuth2Error?]()
+		oauth.authorize() { _, error in firstAnswers.append(error) }
+		
+		var secondAnswers = [OAuth2Error?]()
+		let secondAnswered = expectation(description: "the second sign-in answered")
+		oauth.onAuthorizationCallbackCleared = {
+			oauth.onAuthorizationCallbackCleared = nil
+			// as `OAuth2DataLoader` does from a URL session's queue after a 401
+			DispatchQueue.global().async {
+				oauth.authorize() { _, error in
+					secondAnswers.append(error)
+					secondAnswered.fulfill()
+				}
+			}
+			let deadline = Date().addingTimeInterval(2)
+			while nil == oauth.currentAuthorization && Date() < deadline {
+				usleep(1000)
+			}
+		}
+		oauth.abortAuthorization()
+		XCTAssertEqual([.requestCancelled], firstAnswers)
+		
+		let presented = expectation(for: NSPredicate { _, _ in 2 == authorizer.sessions.count }, evaluatedWith: nil)
+		wait(for: [presented], timeout: 2)
+		XCTAssertTrue(oauth.isPresentingAuthorization, "The second sign-in presents its sheet")
+		XCTAssertEqual(0, authorizer.sessions[1].cancelCount)
+		
+		authorizer.sessions[1].completionHandler(redirectURL(oauth), nil)
+		XCTAssertEqual(1, performer.requests.count)
+		performer.complete(0, with: tokenResponse)
+		wait(for: [secondAnswered], timeout: 2)
+		XCTAssertEqual([nil], secondAnswers, "and it answers")
+		XCTAssertFalse(oauth.isAuthorizing)
+	}
+	
+	func testAbortEndsASignInThatLostItsIdentity() {
+		let (oauth, authorizer, _) = codeGrant()
+		var answers = [OAuth2Error?]()
+		oauth.authorize() { _, error in answers.append(error) }
+		oauth._currentAuthorization = nil
+		
+		oauth.abortAuthorization()
+		XCTAssertEqual([.requestCancelled], answers, "Nothing else could ever answer it")
+		XCTAssertFalse(oauth.isAuthorizing)
+		XCTAssertEqual(1, authorizer.sessions[0].cancelCount)
+	}
+	
+	func testADuplicateRedirectOfACompletedSignInDoesNotFailTheNextOne() {
+		let (oauth, authorizer, performer) = codeGrant()
+		oauth.authorize() { _, _ in }
+		let firstRedirect = redirectURL(oauth)
+		authorizer.sessions[0].completionHandler(firstRedirect, nil)
+		performer.complete(0, with: tokenResponse)
+		XCTAssertFalse(oauth.isAuthorizing)
+		
+		var secondAnswers = [OAuth2Error?]()
+		oauth.authorize() { _, error in secondAnswers.append(error) }
+		// the provider's redirect, delivered a second time
+		oauth.handleRedirectURL(firstRedirect)
+		XCTAssertEqual(1, performer.requests.count, "A duplicate redirect is not exchanged")
+		XCTAssertEqual([], secondAnswers, "and it does not fail the next sign-in")
+		XCTAssertTrue(oauth.isAuthorizing)
+		oauth.abortAuthorization()
+	}
+	
 	func testASessionThatCannotStartFailsTheAuthorization() {
 		let (oauth, authorizer, _) = codeGrant()
 		authorizer.sessionsStart = false
