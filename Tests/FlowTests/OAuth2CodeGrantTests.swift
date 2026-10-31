@@ -951,6 +951,7 @@ class OAuth2AuthenticationSessionTests: XCTestCase {
 		oauth.authorize() { _, error in firstAnswers.append(error) }
 		
 		var secondAnswers = [OAuth2Error?]()
+		var secondIdentity: OAuth2AuthorizationID?
 		let secondAnswered = expectation(description: "the second sign-in answered")
 		oauth.onAuthorizationCallbackCleared = {
 			oauth.onAuthorizationCallbackCleared = nil
@@ -965,12 +966,16 @@ class OAuth2AuthenticationSessionTests: XCTestCase {
 			while nil == oauth.currentAuthorization && Date() < deadline {
 				usleep(1000)
 			}
+			secondIdentity = oauth.currentAuthorization
 		}
 		oauth.abortAuthorization()
 		XCTAssertEqual([.requestCancelled], firstAnswers)
+		XCTAssertNotNil(secondIdentity)
+		XCTAssertEqual(secondIdentity, oauth.currentAuthorization, "The second sign-in keeps the one identity it began with")
 		
 		let presented = expectation(for: NSPredicate { _, _ in 2 == authorizer.sessions.count }, evaluatedWith: nil)
 		wait(for: [presented], timeout: 2)
+		XCTAssertEqual(secondIdentity, oauth.currentAuthorization)
 		XCTAssertTrue(oauth.isPresentingAuthorization, "The second sign-in presents its sheet")
 		XCTAssertEqual(0, authorizer.sessions[1].cancelCount)
 		
@@ -980,6 +985,50 @@ class OAuth2AuthenticationSessionTests: XCTestCase {
 		wait(for: [secondAnswered], timeout: 2)
 		XCTAssertEqual([nil], secondAnswers, "and it answers")
 		XCTAssertFalse(oauth.isAuthorizing)
+	}
+	
+	func testAnAbortConcurrentWithAStartingSignInEndsItCleanlyOrLeavesItAlone() {
+		for round in 0..<40 {
+			let (oauth, authorizer, _) = codeGrant()
+			var answers = [OAuth2Error?]()
+			var afterCalls = 0
+			oauth.afterAuthorizeOrFail = { _, _ in afterCalls += 1 }
+			let started = DispatchSemaphore(value: 0)
+			// as `OAuth2DataLoader` does from a URL session's queue after a 401
+			DispatchQueue.global().async {
+				oauth.authorize() { _, error in answers.append(error) }
+				started.signal()
+			}
+			usleep(useconds_t(round * 5))
+			oauth.abortAuthorization()
+			
+			// the starting sign-in hops to the main thread to present its sheet
+			while .timedOut == started.wait(timeout: .now()) {
+				RunLoop.current.run(until: Date().addingTimeInterval(0.001))
+			}
+			RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+			
+			if oauth.isAuthorizing {
+				// the abort came first and found nothing to abort
+				XCTAssertEqual([], answers, "round \(round)")
+				XCTAssertEqual(0, afterCalls, "round \(round)")
+				XCTAssertNotNil(oauth.currentAuthorization, "round \(round)")
+				XCTAssertTrue(oauth.isPresentingAuthorization, "round \(round)")
+				XCTAssertEqual(1, authorizer.sessions.count, "round \(round)")
+				oauth.abortAuthorization()
+				XCTAssertEqual([.requestCancelled], answers, "round \(round)")
+				XCTAssertEqual(1, authorizer.sessions[0].cancelCount, "round \(round)")
+			}
+			else {
+				// the abort ended it, and nothing of it goes on
+				XCTAssertEqual([.requestCancelled], answers, "round \(round)")
+				XCTAssertEqual(1, afterCalls, "round \(round)")
+				XCTAssertFalse(oauth.isPresentingAuthorization, "round \(round)")
+				XCTAssertEqual(0, authorizer.sessions.count, "An ended sign-in presents no sheet (round \(round))")
+			}
+			XCTAssertNil(oauth.currentAuthorization, "round \(round)")
+			XCTAssertFalse(oauth.isAuthorizing, "round \(round)")
+		}
 	}
 	
 	func testAbortEndsASignInThatLostItsIdentity() {
