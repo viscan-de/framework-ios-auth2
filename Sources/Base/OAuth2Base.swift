@@ -261,17 +261,39 @@ open class OAuth2Base: OAuth2Securable {
 	}
 	
 	/**
-	Ends the authorization in progress: it loses its identity, so its work's late answers are dropped; its state is retired, so the next
-	authorization sends another and a late redirect carrying this one is recognized (`isLateRedirect(_:)`); and the screen presented for
-	it is taken down. Main thread.
+	Retires the authorization that is ending: it loses its identity, so its work's late answers are dropped; its state is retired, so the
+	next authorization sends another and a late redirect carrying this one is recognized (`isLateRedirect(_:)`); and the screen
+	presented for it is taken down. Main thread.
+	
+	Only what is `ending`'s: the next authorization may already have started on another thread (`OAuth2DataLoader` starts one from a URL
+	session's queue), and its identity and screen stay. The state retired is still the ending authorization's: the next one issues its
+	own on the main thread when it presents its screen, after this.
+	
+	- parameter ending: What `currentAuthorization` was when the authorization's end began
 	*/
-	private func retireCurrentAuthorization() {
+	private func retireAuthorization(_ ending: OAuth2AuthorizationID?) {
 		authorizationLock.lock()
-		_currentAuthorization = nil
+		if _currentAuthorization == ending {
+			_currentAuthorization = nil
+		}
+		var presentation: (id: OAuth2PresentationID, dismiss: () -> Void)?
+		if let registered = _presentation, registered.id.authorization == ending {
+			presentation = registered
+			_presentation = nil
+		}
+		authorizationLock.unlock()
+		context.retireState()
+		presentation?.dismiss()
+	}
+	
+	/**
+	Takes down whatever screen is registered, whichever authorization it was presented for. Main thread.
+	*/
+	private func dismissAnyPresentation() {
+		authorizationLock.lock()
 		let presentation = _presentation
 		_presentation = nil
 		authorizationLock.unlock()
-		context.retireState()
 		presentation?.dismiss()
 	}
 	
@@ -507,12 +529,13 @@ open class OAuth2Base: OAuth2Securable {
 				return
 			}
 			// The authorization has fully ended before anyone hears of it: the callback may start the next one, or abort.
+			let ending = self.currentAuthorization
 			let callback = self.didAuthorizeOrFail
 			let internalAfter = self.internalAfterAuthorizeOrFail
 			let after = self.afterAuthorizeOrFail
 			self.didAuthorizeOrFail = nil
 			self.onAuthorizationCallbackCleared?()
-			self.retireCurrentAuthorization()
+			self.retireAuthorization(ending)
 			internalAfter?(nil == parameters, finalError)
 			callback?(parameters, finalError)
 			after?(parameters, finalError)
@@ -527,11 +550,26 @@ open class OAuth2Base: OAuth2Securable {
 	finishes and stores the tokens it receives, since the provider may already have rotated the refresh token. Does nothing when no
 	authorization is in progress.
 	
+	An authorization in progress without an identity, which nothing else could ever answer, is ended all the same, and whatever screen
+	is up is taken down.
+	
 	Can be called on any thread: off the main thread it returns at once and answers on the main thread, so it never waits on it.
 	*/
 	open func abortAuthorization() {
 		guard let authorization = currentAuthorization else {
-			logger?.debug("OAuth2", msg: "No authorization in progress to abort")
+			guard isAuthorizing else {
+				logger?.debug("OAuth2", msg: "No authorization in progress to abort")
+				return
+			}
+			callAsyncOnMainThread {
+				// Checked again here: `didAuthorizeOrFail` is set an instant before its identity is issued.
+				guard self.isAuthorizing, nil == self.currentAuthorization else {
+					return
+				}
+				self.logger?.warn("OAuth2", msg: "Aborting an authorization that has no identity")
+				self.dismissAnyPresentation()
+				self.didFail(with: nil)
+			}
 			return
 		}
 		logger?.debug("OAuth2", msg: "Aborting authorization")
@@ -660,7 +698,8 @@ open class OAuth2Base: OAuth2Securable {
 	}
 	
 	/**
-	This method checks `state`, throws `OAuth2Error.missingState` or `OAuth2Error.invalidState`. Resets state if it matches.
+	This method checks `state`, throws `OAuth2Error.missingState` or `OAuth2Error.invalidState`. Retires the state if it matches, so a
+	second delivery of the same redirect is recognized by `isLateRedirect(_:)`.
 	*/
 	public final func assureMatchesState(_ params: OAuth2JSON) throws {
 		guard let state = params["state"] as? String, !state.isEmpty else {
@@ -670,7 +709,8 @@ open class OAuth2Base: OAuth2Securable {
 		if !context.matchesState(state) {
 			throw OAuth2Error.invalidState
 		}
-		context.resetState()
+		// Retired, not just reset: the provider may deliver the same redirect again during the next authorization.
+		context.retireState()
 	}
 	
 	/**
