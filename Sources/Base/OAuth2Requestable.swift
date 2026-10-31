@@ -132,30 +132,68 @@ open class OAuth2Requestable {
 		self.logger?.trace("OAuth2", msg: "REQUEST\n\(request.debugDescription)\n---")
 		let performer = requestPerformer ?? OAuth2DataTaskRequestPerformer(session: session)
 		requestPerformer = performer
+		let running = OAuth2RunningRequest()
 		let task = performer.perform(request: request) { sessData, sessResponse, error in
-			self.abortableTask = nil
+			self.requestDidFinish(running)
 			self.logger?.trace("OAuth2", msg: "RESPONSE\n\(sessResponse?.debugDescription ?? "no response")\n\n\(String(data: sessData ?? Data(), encoding: String.Encoding.utf8) ?? "no data")\n---")
 			let http = (sessResponse as? HTTPURLResponse) ?? HTTPURLResponse(url: request.url!, statusCode: 499, httpVersion: nil, headerFields: nil)!
 			let response = OAuth2Response(data: sessData, request: request, response: http, error: error)
 			callback(response)
 		}
-		abortableTask = task
+		if let task = task {
+			requestDidStart(running, task: task)
+		}
 	}
 	
-	/// Currently running abortable session task.
-	private var abortableTask: URLSessionTask?
+	/// Guards `abortableRequests` and the `OAuth2RunningRequest`s they hold. A request's completion runs on the URL session's queue,
+	/// while `perform(request:callback:)` and `abortTask()` run on whichever thread their caller is on.
+	private let abortableRequestLock = NSLock()
+	
+	/// The requests `abortTask()` cancels: those started by `perform(request:callback:)` that have not answered yet. Only touch while
+	/// holding `abortableRequestLock`.
+	private var abortableRequests = [OAuth2RunningRequest]()
 	
 	/**
-	Can be called to immediately abort the currently running authorization request, if it was started by `perform(request:callback:)`.
+	Makes a request abortable once its performer has returned the task, unless the request has answered already: a performer may call
+	the completion handler before it returns, and a request that has answered has nothing left to abort.
+	*/
+	private func requestDidStart(_ running: OAuth2RunningRequest, task: URLSessionTask) {
+		abortableRequestLock.lock()
+		defer { abortableRequestLock.unlock() }
+		guard !running.hasFinished else {
+			return
+		}
+		running.task = task
+		abortableRequests.append(running)
+	}
 	
-	- returns: A bool indicating whether a task was aborted or not
+	/**
+	Called first thing in a request's completion: the request is no longer abortable. Other requests still running stay abortable.
+	*/
+	private func requestDidFinish(_ running: OAuth2RunningRequest) {
+		abortableRequestLock.lock()
+		defer { abortableRequestLock.unlock() }
+		running.hasFinished = true
+		running.task = nil
+		abortableRequests.removeAll { $0 === running }
+	}
+	
+	/**
+	Can be called to immediately abort the currently running authorization requests, those started by `perform(request:callback:)` that
+	have not answered yet.
+	
+	- returns: true if a request was running and has been cancelled; its completion still runs
 	*/
 	func abortTask() -> Bool {
-		guard let task = abortableTask else {
+		abortableRequestLock.lock()
+		let tasks = abortableRequests.compactMap { $0.task }
+		abortableRequests.removeAll()
+		abortableRequestLock.unlock()
+		guard !tasks.isEmpty else {
 			return false
 		}
 		logger?.debug("OAuth2", msg: "Aborting request")
-		task.cancel()
+		tasks.forEach { $0.cancel() }
 		return true
 	}
 	
@@ -207,6 +245,20 @@ open class OAuth2Requestable {
 		}
 		return params
 	}
+}
+
+
+/**
+A request started by `OAuth2Requestable.perform(request:callback:)`, from the moment it is started until its completion runs. Only
+touched while holding the requestable's `abortableRequestLock`.
+*/
+private final class OAuth2RunningRequest {
+	
+	/// The request's task, once its performer has returned it and as long as the request has not answered.
+	var task: URLSessionTask?
+	
+	/// Whether the request's completion has run.
+	var hasFinished = false
 }
 
 
