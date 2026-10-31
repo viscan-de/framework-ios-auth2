@@ -199,5 +199,78 @@ class OAuth2Tests: XCTestCase {
 	
 	class SessDelegate: NSObject, URLSessionDelegate {
 	}
+	
+	
+	// MARK: - Abortable Requests
+	
+	func tokenRequest() -> URLRequest {
+		return URLRequest(url: URL(string: "https://token.ful.io")!)
+	}
+	
+	func testARequestThatCompletedBeforePerformReturnedIsNotAbortable() {
+		let oauth = genericOAuth2()
+		oauth.requestPerformer = OAuth2CompletingRequestPerformer()
+		var answers = 0
+		oauth.perform(request: tokenRequest()) { _ in answers += 1 }
+		
+		XCTAssertEqual(1, answers)
+		XCTAssertFalse(oauth.abortTask(), "A request that has answered leaves nothing to abort")
+	}
+	
+	func testARunningRequestIsAbortableUntilItCompletes() {
+		let oauth = genericOAuth2()
+		let performer = OAuth2HeldRequestPerformer()
+		oauth.requestPerformer = performer
+		oauth.perform(request: tokenRequest()) { _ in }
+		XCTAssertTrue(oauth.abortTask(), "A request still running can be aborted")
+		
+		performer.complete(0)
+		XCTAssertFalse(oauth.abortTask(), "A request that has answered leaves nothing to abort")
+	}
+	
+	func testOneRequestEndingLeavesAnotherOneAbortable() {
+		let oauth = genericOAuth2()
+		let performer = OAuth2HeldRequestPerformer()
+		oauth.requestPerformer = performer
+		oauth.perform(request: tokenRequest()) { _ in }
+		oauth.perform(request: tokenRequest()) { _ in }
+		
+		performer.complete(0)
+		XCTAssertTrue(oauth.abortTask(), "The second request is still running")
+	}
+}
+
+
+/**
+Answers every request before `perform` returns, as a request failing at once can.
+*/
+class OAuth2CompletingRequestPerformer: OAuth2RequestPerformer {
+	
+	func perform(request: URLRequest, completionHandler: @escaping (Data?, URLResponse?, Error?) -> Void) -> URLSessionTask? {
+		let task = OAuth2HeldRequestPerformer.session.dataTask(with: request)
+		completionHandler(nil, nil, URLError(.cannotConnectToHost))
+		return task
+	}
+}
+
+
+/**
+Holds every request's completion until the test calls `complete(_:)`. Its tasks are never resumed, so nothing goes over the network.
+*/
+class OAuth2HeldRequestPerformer: OAuth2RequestPerformer {
+	
+	static let session = URLSession(configuration: .ephemeral)
+	
+	private var completions = [(Data?, URLResponse?, Error?) -> Void]()
+	
+	func perform(request: URLRequest, completionHandler: @escaping (Data?, URLResponse?, Error?) -> Void) -> URLSessionTask? {
+		completions.append(completionHandler)
+		return type(of: self).session.dataTask(with: request)
+	}
+	
+	/// Answers the request performed `index`th with a transport failure.
+	func complete(_ index: Int) {
+		completions[index](nil, nil, URLError(.cannotConnectToHost))
+	}
 }
 
