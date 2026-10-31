@@ -281,8 +281,18 @@ open class OAuth2Authorizer: OAuth2AuthorizerUI {
 			}
 			return false
 		}
-		controller.onWillCancel = {
+		controller.onWillCancel = { [weak controller] in
 			guard self.oauth2.isCurrentPresentation(presentation) else {
+				// The window refuses to close by itself (`windowShouldClose` answers false and leaves closing to whoever ends
+				// the authorization), and nobody will end this one any more: close it here.
+				if let window = controller?.view.window {
+					if let parent = window.sheetParent {
+						parent.endSheet(window)
+					}
+					else {
+						window.close()
+					}
+				}
 				return
 			}
 			self.oauth2.endPresentation(presentation)
