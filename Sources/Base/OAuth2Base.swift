@@ -146,9 +146,13 @@ open class OAuth2Base: OAuth2Securable {
 		}
 		set {
 			authorizationLock.lock()
-			defer { authorizationLock.unlock() }
+			let old = _didAuthorizeOrFail
 			_didAuthorizeOrFail = newValue
 			_currentAuthorization = (nil == newValue) ? nil : OAuth2AuthorizationID(serial: nextSerial())
+			authorizationLock.unlock()
+			// Released after the unlock: what the old closure holds may read `isAuthorizing` as it goes away, and the lock is not
+			// recursive.
+			withExtendedLifetime(old) {}
 		}
 	}
 	
@@ -284,10 +288,13 @@ open class OAuth2Base: OAuth2Securable {
 	*/
 	public final func endPresentation(_ presentation: OAuth2PresentationID) {
 		authorizationLock.lock()
-		defer { authorizationLock.unlock() }
-		if _presentation?.id == presentation {
+		let ended = _presentation
+		if ended?.id == presentation {
 			_presentation = nil
 		}
+		authorizationLock.unlock()
+		// Released after the unlock, for the same reason as in `didAuthorizeOrFail`'s setter.
+		withExtendedLifetime(ended) {}
 	}
 	
 	/// What `takeEndingAuthorization(_:)` took from an authorization that ends.
