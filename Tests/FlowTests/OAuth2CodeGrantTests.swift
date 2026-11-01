@@ -1039,8 +1039,12 @@ class OAuth2AuthenticationSessionTests: XCTestCase {
 		performer.complete(0, with: tokenResponse)
 		XCTAssertFalse(oauth.isAuthorizing)
 		
+		// signing in again, as the app does, starts from no tokens; with the first sign-in's unexpired token the second one would
+		// answer at once without a sheet
+		oauth.forgetTokens()
 		var secondAnswers = [OAuth2Error?]()
 		oauth.authorize() { _, error in secondAnswers.append(error) }
+		XCTAssertEqual(2, authorizer.sessions.count, "The second sign-in presents its sheet")
 		// the provider's redirect, delivered a second time
 		oauth.handleRedirectURL(firstRedirect)
 		XCTAssertEqual(1, performer.requests.count, "A duplicate redirect is not exchanged")
