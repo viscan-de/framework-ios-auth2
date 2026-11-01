@@ -1039,7 +1039,7 @@ class OAuth2AuthenticationSessionTests: XCTestCase {
 		performer.complete(0, with: tokenResponse)
 		XCTAssertFalse(oauth.isAuthorizing)
 		
-		// signing in again, as the app does, starts from no tokens; with the first sign-in's unexpired token the second one would
+		// an app signing a user in again forgets the tokens first; with the first sign-in's unexpired token the second one would
 		// answer at once without a sheet
 		oauth.forgetTokens()
 		var secondAnswers = [OAuth2Error?]()

@@ -28,10 +28,11 @@ fork, and are left that way. The entries from 5.3.5 down are upstream's.
   - a refresh or registration still running when it ended presents no sign-in screen.
 - Ending an authorization, or a redirect matching its state, retires the state, so the next authorization sends a new one. The
   code and implicit grants drop a redirect carrying a retired state (`isLateRedirect(_:)`), so a late or duplicate redirect
-  reaching `handleRedirectURL` answers nobody; a redirect with a state that was never issued still fails as `.invalidState`.
+  reaching `handleRedirectURL` answers nobody (the last 16 retired states are remembered); a redirect with a state that was never
+  issued, or retired longer ago, still fails as `.invalidState`.
 - Starting and ending an authorization are single steps under a lock: its callback (`didAuthorizeOrFail`) and its identity are
-  set together (`authorize()` uses the new `beginAuthorization(callback:)`, which answers `.alreadyAuthorizing` while one is in
-  progress) and cleared together with its screen. A sign-in started on another thread while one ends (as `OAuth2DataLoader`
+  set together (`authorize()` uses the new `beginAuthorization(callback:)`, which returns nil while one is in progress;
+  `authorize()` then answers `.alreadyAuthorizing` as before) and cleared together with its screen. A sign-in started on another thread while one ends (as `OAuth2DataLoader`
   does after a 401) keeps its identity and screen, and an abort either ends a sign-in that is starting or leaves it alone.
 - Device polling started for an authorization stops when it ends; started outside one, it answers as before.
 - An `ASWebAuthenticationSession` that does not start fails the authorization with `.unableToOpenAuthorizeURL`, and on iOS so does

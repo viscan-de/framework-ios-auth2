@@ -183,6 +183,8 @@ open class OAuth2Base: OAuth2Securable {
 	/// Guards `_didAuthorizeOrFail`, `_currentAuthorization`, `_presentation` and `lastSerial`, so an authorization's callback and its
 	/// identity are only ever set and cleared together. An authorization can start on any thread (`OAuth2DataLoader` starts one from a
 	/// URL session's queue), its requests answer on theirs, and its sign-in screens live on the main thread.
+	/// Never call out or let go of a stored closure while holding it: the lock is not recursive, and what a closure holds may read
+	/// these properties as it goes away.
 	private let authorizationLock = NSLock()
 	
 	/// Backs `didAuthorizeOrFail`. Non-nil exactly while `_currentAuthorization` is. Only touch while holding `authorizationLock`.

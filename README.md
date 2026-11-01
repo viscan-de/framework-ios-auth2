@@ -212,8 +212,11 @@ Of course you can use your own `URLSession` with these requests, you don't have 
 ### 7. Cancel Authorization
 
 You can cancel an ongoing authorization any time by calling `oauth2.abortAuthorization()`.
-This will cancel ongoing requests (like a code exchange request) or call the callback while you're waiting for a user to login on a webpage.
-The latter will dismiss embedded login screens or redirect the user back to the app.
+It answers the authorization's callback with `.requestCancelled` and cancels the authorization's own token requests (like a code
+exchange request), but never a refresh-token request: that one finishes and stores its tokens, and only its answer is dropped.
+It takes down an `ASWebAuthenticationSession` sheet; a Safari view controller, a web view controller or a macOS web view window stays
+yours to close, unless `authorizeEmbeddedAutoDismiss` presented it.
+With no authorization in progress it does nothing. Called off the main thread it returns at once and answers on the main thread.
 
 ### 8. Re-Authorize
 
