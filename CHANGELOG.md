@@ -32,17 +32,18 @@ fork, and are left that way. The entries from 5.3.5 down are upstream's.
   issued, or retired longer ago, still fails as `.invalidState`.
 - Starting and ending an authorization are single steps under a lock: its callback (`didAuthorizeOrFail`) and its identity are
   set together (`authorize()` uses the new `beginAuthorization(callback:)`, which returns nil while one is in progress;
-  `authorize()` then answers `.alreadyAuthorizing` as before) and cleared together with its screen. A sign-in started on another thread while one ends (as `OAuth2DataLoader`
-  does after a 401) keeps its identity and screen, and an abort either ends a sign-in that is starting or leaves it alone.
+  `authorize()` then answers `.alreadyAuthorizing` as before) and cleared together with its screen. A sign-in started on another
+  thread while one ends (as `OAuth2DataLoader` does after a 401) keeps its identity and screen, and an abort either ends a sign-in
+  that is starting or leaves it alone.
 - Device polling started for an authorization stops when it ends; started outside one, it answers as before.
 - An `ASWebAuthenticationSession` that does not start fails the authorization with `.unableToOpenAuthorizeURL`, and on iOS so does
   a redirect URL that does not parse; both used to leave the authorization waiting forever.
 - The requests an abort can cancel are guarded by a lock, and a request that answered before `perform(request:callback:)`
   returned is no longer counted abortable.
 - New public API:
-  - `OAuth2Base`: `beginAuthorization(callback:)`, `currentAuthorization`, `isCurrentAuthorization(_:)`, `didAuthorize(withParameters:for:)`,
-    `didFail(with:for:)`, `isPresentingAuthorization`, `beginPresentation(dismiss:)`, `isCurrentPresentation(_:)`,
-    `endPresentation(_:)`, `isLateRedirect(_:)`;
+  - `OAuth2Base`: `beginAuthorization(callback:)`, `currentAuthorization`, `isCurrentAuthorization(_:)`,
+    `didAuthorize(withParameters:for:)`, `didFail(with:for:)`, `isPresentingAuthorization`, `beginPresentation(dismiss:)`,
+    `isCurrentPresentation(_:)`, `endPresentation(_:)`, `isLateRedirect(_:)`;
   - `OAuth2Requestable.keepingRunningOnAbort(_:)`;
   - `OAuth2AuthorizationID`, `OAuth2PresentationID`;
   - the `OAuth2WebAuthenticationSession` protocol, which `ASWebAuthenticationSession` adopts;
