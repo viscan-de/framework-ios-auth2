@@ -245,6 +245,25 @@ class OAuth2Tests: XCTestCase {
 		XCTAssertEqual(.success, cleared.wait(timeout: .now() + 2), "The old callback is released outside the lock")
 		XCTAssertEqual(false, sawAuthorizing)
 	}
+
+	func testADismissReleasedByEndingItsPresentationMayReadIsPresentingAuthorization() {
+		let oauth = genericOAuth2()
+		var sawPresenting: Bool?
+		let presentation: OAuth2PresentationID
+		do {
+			let probe = OAuth2DeinitProbe { sawPresenting = oauth.isPresentingAuthorization }
+			presentation = oauth.beginPresentation { withExtendedLifetime(probe) {} }
+		}
+
+		// off the main thread, so a deadlock on the authorization lock fails the test instead of hanging it
+		let ended = DispatchSemaphore(value: 0)
+		DispatchQueue.global().async {
+			oauth.endPresentation(presentation)
+			ended.signal()
+		}
+		XCTAssertEqual(.success, ended.wait(timeout: .now() + 2), "The ended screen's dismiss is released outside the lock")
+		XCTAssertEqual(false, sawPresenting)
+	}
 	
 	func testOneRequestEndingLeavesAnotherOneAbortable() {
 		let oauth = genericOAuth2()
