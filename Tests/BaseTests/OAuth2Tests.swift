@@ -228,6 +228,24 @@ class OAuth2Tests: XCTestCase {
 		XCTAssertFalse(oauth.abortTask(), "A request that has answered leaves nothing to abort")
 	}
 	
+	func testACallbackReleasedByClearingItMayReadIsAuthorizing() {
+		let oauth = genericOAuth2()
+		var sawAuthorizing: Bool?
+		do {
+			let probe = OAuth2DeinitProbe { sawAuthorizing = oauth.isAuthorizing }
+			oauth.didAuthorizeOrFail = { _, _ in withExtendedLifetime(probe) {} }
+		}
+		
+		// off the main thread, so a deadlock on the authorization lock fails the test instead of hanging it
+		let cleared = DispatchSemaphore(value: 0)
+		DispatchQueue.global().async {
+			oauth.didAuthorizeOrFail = nil
+			cleared.signal()
+		}
+		XCTAssertEqual(.success, cleared.wait(timeout: .now() + 2), "The old callback is released outside the lock")
+		XCTAssertEqual(false, sawAuthorizing)
+	}
+	
 	func testOneRequestEndingLeavesAnotherOneAbortable() {
 		let oauth = genericOAuth2()
 		let performer = OAuth2HeldRequestPerformer()
@@ -237,6 +255,23 @@ class OAuth2Tests: XCTestCase {
 		
 		performer.complete(0)
 		XCTAssertTrue(oauth.abortTask(), "The second request is still running")
+	}
+}
+
+
+/**
+Calls `onDeinit` when it goes away.
+*/
+class OAuth2DeinitProbe {
+	
+	let onDeinit: () -> Void
+	
+	init(onDeinit: @escaping () -> Void) {
+		self.onDeinit = onDeinit
+	}
+	
+	deinit {
+		onDeinit()
 	}
 }
 
